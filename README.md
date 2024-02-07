@@ -3,7 +3,8 @@
 The ultimate python package to work with stock and crypto data
 
 ```bash
-pip install goldhand
+pip install goldhand # en production
+python -m pip install -e path/to/goldhand # en développement
 ```
 
 

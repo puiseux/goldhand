@@ -4,19 +4,57 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import plotly.express as px
+# import talipp
+
+from jgtapy import Indicators
 from goldhand import *
-# from goldhand import GoldHand
 
-
-def rsi_strategy(data, buy_threshold = 30, sell_threshold = 70):
+def ichimoku_strategy(data, buy_at='gold', sell_at='grey'):
     """
-    RSI strategy for backtesting with Backtest class
+    auteur : Pierre Puiseux
+
+    This function implements the Ichimoku strategy.
     
     Parameters:
-    - data: pandas DataFrame with columns: date, open, high, low, close, volume and rsi
-    - buy_threshold: int, default 30,  buy when RSI is below this value
-    - sell_threshold: int, default 70, sell when RSI is above this value
+    - data (pandas DataFrame) : The DataFrame containing the data.
+    - buy_at (str): The color of the line to buy at. Default is 'gold'.
+    - sell_at (str): The color of the line to sell at. Default is 'grey'.
+    
+    Returns: The trades of the Ichimoku strategy.
     """
+
+    data['hl2'] = (data['high'] + data['low'])/2
+    i = Indicators(data)
+    # i.accelerator_oscillator(column_name='AC')
+    # i.fractals(column_name_high='fb',column_name_low='fs')
+    # i.sma()
+    # df = i.df
+    i.ichimoku_kinko_hyo()
+    print(i.df.columns)
+
+    # exit()
+    def smma(data, window, colname):
+        hl2 = data['hl2'].values
+        smma_values = [hl2[0]]
+
+        for i in range(1, len(hl2)):
+            smma_val = (smma_values[-1] * (window - 1) + hl2[i]) / window
+            smma_values.append(smma_val)
+
+        data[colname] = smma_values
+        return data
+
+    # Apply SMMA to the dataframe
+    data = smma(data, 15, 'v1')
+    data = smma(data, 19, 'v2')
+    data = smma(data, 25, 'v3')
+    data = smma(data, 29, 'v4')
+
+    data['color'] = 'grey'  # Set default color to grey
+
+    # Update color based on conditions
+    data.loc[(data['v4'] < data['v3']) & (data['v3'] < data['v2']) & (data['v2'] < data['v1']), 'color'] = 'gold'
+    data.loc[(data['v1'] < data['v2']) & (data['v2'] < data['v3']) & (data['v3'] < data['v4']), 'color'] = 'blue'
 
     in_trade = False  # Flag to track if already in a trade
     trade_id = 1
@@ -28,8 +66,7 @@ def rsi_strategy(data, buy_threshold = 30, sell_threshold = 70):
         # Check if not already in a trade
         if not in_trade:
             # Generate buy signal
-            #You have to change olne the buy and sell signal
-            if data['rsi'][i] < buy_threshold:
+            if (data['color'][i] ==buy_at) :
 
                 if i == (len(data) -1): 
                     temp_trade['buy_price'] = data['close'][i]
@@ -37,34 +74,35 @@ def rsi_strategy(data, buy_threshold = 30, sell_threshold = 70):
                 else:
                     temp_trade['buy_price'] = data['open'][i+1]
                     temp_trade.update(dict(data.iloc[i+1].add_prefix('buy_')))
-
+                
+                
                 temp_trade['trade_id'] = trade_id
                 temp_trade['status'] = 'open'
                 in_trade = True  # Set flag to indicate in a trade
         else:
             # Generate sell signal
-            #You have to change olne the buy and sell signal
-            if data['rsi'][i] > sell_threshold:
+            if (data['color'][i] ==sell_at) :
+
                 if i == (len(data) -1): 
                     temp_trade['sell_price'] = data['close'][i]
                     temp_trade.update(dict(data.iloc[i].add_prefix('sell_')))
                 else:
                     temp_trade['sell_price'] = data['open'][i+1]
                     temp_trade.update(dict(data.iloc[i+1].add_prefix('sell_')))
-                                       
+                
                 temp_trade['trade_id'] = trade_id
                 temp_trade['status'] = 'closed'
 
-                
                 # calculate results
                 temp_trade['result'] = temp_trade['sell_price'] / temp_trade['buy_price']
                 temp_trade['days_in_trade'] = (temp_trade['sell_date'] - temp_trade['buy_date']).days
+
+
 
                 in_trade = False  # Reset flag to indicate not in a trade
                 trade_id +=1
                 all_trades.append(temp_trade)
                 temp_trade = {}
-                
     if temp_trade:
         temp_trade['sell_price'] = data['close'][i]
         temp_trade['trade_id'] = trade_id
@@ -75,8 +113,8 @@ def rsi_strategy(data, buy_threshold = 30, sell_threshold = 70):
         all_trades.append(temp_trade)
 
     res_df = pd.DataFrame(all_trades)
-    
     # change orders
+
     all_col = res_df.columns.tolist()
     first = ['result', 'buy_price', 'sell_price', 'buy_date', 'sell_date', 'days_in_trade']
     first.extend([x for x in all_col if x not in first])
@@ -84,44 +122,105 @@ def rsi_strategy(data, buy_threshold = 30, sell_threshold = 70):
     return(res_df)
 
 
-
-def show_indicator_rsi_strategy(ticker, buy_threshold = 30, sell_threshold = 70, plot_title = '', ndays=0, plot_height=1000, add_strategy_summary = True):
+def show_indicator_ichimoku_strategy(ticker, plot_title = '', buy_at='gold', sell_at='grey', ndays=0, plot_height=1000, add_strategy_summary = True):
     """
-    Show RSI strategy result in one plot: candlestick chart, SMA lines, trades, RSI indicator, summary of the strategy on the left side of the plot
+    This function shows the GoldHandLine strategy on a plotly chart including the price,  trades, strategy summary and GoldHandLine indicator.
+       
     Parameters:
-    - ticker: str, ticker symbol
-    - buy_threshold: int, default 30,  buy when RSI is below this value
-    - sell_threshold: int, default 70, sell when RSI is above this value
-    - plot_title: str, default '', title of the plot
-    - ndays: int, default 0, number of days to show, if 0, show all data
-    - plot_height: int, default 1000, height of the plot
-    - add_strategy_summary: bool, default True, add strategy summary to the plot
+    - ticker (str): The ticker of the stock or crypto or ETF.
+    - plot_title (str): The title of the plot.
+    - buy_at (str): The color of the line to buy at. Default is 'gold'.
+    - sell_at (str): The color of the line to sell at. Default is 'grey'.
+    - ndays (int): The number of days to show. If 0, all data will be shown.
+    - plot_height (int): The height of the plot.
+    - add_strategy_summary (bool): If True, the strategy summary will be added to the plot.
+    
+    Returns: The plot including the price,  trades, strategy summary and GoldHandLine indicator.
     """
 
-    tdf = GoldHand(ticker).df
-    backtest = Backtest( tdf, rsi_strategy, buy_threshold=buy_threshold, sell_threshold=sell_threshold)
+    data = GoldHand(ticker).df
+
+    #### data prepar
+    data['hl2'] = (data['high'] + data['low'])/2
+
+    def smma(data, window, colname):
+        hl2 = data['hl2'].values
+        smma_values = [hl2[0]]
+
+        for i in range(1, len(hl2)):
+            smma_val = (smma_values[-1] * (window - 1) + hl2[i]) / window
+            smma_values.append(smma_val)
+
+        data[colname] = smma_values
+        return data
+
+    # Apply SMMA to the dataframe
+    data = smma(data, 15, 'v1')
+    data = smma(data, 19, 'v2')
+    data = smma(data, 25, 'v3')
+    data = smma(data, 29, 'v4')
+
+    data['color'] = 'grey'  # Set default color to grey
+
+    # Update color based on conditions
+    data.loc[(data['v4'] < data['v3']) & (data['v3'] < data['v2']) & (data['v2'] < data['v1']), 'color'] = 'gold'
+    data.loc[(data['v1'] < data['v2']) & (data['v2'] < data['v3']) & (data['v3'] < data['v4']), 'color'] = 'blue'
+
+
+
+    # Identify rows where color changes compared to the previous row
+    data['color_change'] = data['color'] != data['color'].shift(1)
+
+    # Create a 'group' column and increase the value only when there's a color change
+    data['group'] = (data['color_change']).cumsum()
+
+    ##### data preparation end
+
+    ##### backtest
+    backtest = Backtest( data, goldhand_line_strategy, plot_title =plot_title, buy_at= buy_at, sell_at=sell_at)
     trades =backtest.trades
-    
-    if ndays > 0:
-        tdf = tdf.tail(ndays)
-        trades = trades.loc[trades['buy_date']>tdf.date.min()]
-        
-    if tdf['high'].max() == max(tdf['high'][0:50]):
+
+    if ndays!=0:
+      data = data.tail(ndays)
+      trades = trades.loc[trades['buy_date']>data.date.min()]
+
+    if data['high'].max() == max(data['high'][0:50]):
         tex_loc = [0.1, 0.2]
     else:
         tex_loc = [0.1, 0.85]
 
-    
+    # base plot
+    fig = go.Figure(data=go.Ohlc(x=data['date'], open=data['open'], high=data['high'], low=data['low'],close=data['close']))
+    fig.update_xaxes( mirror=True, ticks='outside', showline=True, linecolor='black', gridcolor='lightgrey' )
+    fig.update_yaxes( mirror=True, ticks='outside', showline=True, linecolor='black', gridcolor='lightgrey')
+    fig.update(layout_xaxis_rangeslider_visible=False)
 
-    # Create subplots with shared x-axis and custom heights
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1, subplot_titles=['', "RSI"], row_heights=[0.7, 0.3])
 
-    # Add OHLC candlestick chart
-    fig.add_trace(go.Ohlc(x=tdf['date'], open=tdf['open'], high=tdf['high'], low=tdf['low'], close=tdf['close']), row=1, col=1)
+    for group_id in data['group'].unique():
+        if group_id ==data['group'].unique().max():
 
-    # Add SMA lines
-    fig.add_trace(go.Scatter(x=tdf['date'], y=tdf['sma_50'], opacity=0.5, line=dict(color='lightblue', width=2), name='SMA 50'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=tdf['date'], y=tdf['sma_200'], opacity=0.7, line=dict(color='red', width=2.5), name='SMA 200'), row=1, col=1)
+            indices = data[data['group'] == group_id].index.to_list()
+        else:
+            indices = data[data['group'] == group_id].index.to_list()
+            indices.append(indices[-1]+1)
+
+
+        group_df = data.loc[indices]
+
+        group_color = group_df['color'].iloc[0]
+        color_dict = {'gold' : 'rgba(255, 215, 0, 0.4)' , 'grey' : 'rgba(128, 128 ,128, 0.4)' , 'blue' : 'rgba(0, 0, 255, 0.4)' }
+
+
+
+        # Create v1 and v4 traces
+        trace_v1 = go.Scatter(x=group_df['date'], y=group_df['v1'], mode='lines', name='v1', line=dict(color=color_dict[group_color]) )
+        trace_v4 = go.Scatter(x=group_df['date'], y=group_df['v4'], mode='lines', name='v4', line=dict(color=color_dict[group_color]), fill='tonexty', fillcolor =color_dict[group_color])
+
+
+        # Add candlestick trace and additional lines to the figure
+        fig.add_trace(trace_v1)
+        fig.add_trace(trace_v4)
+
 
     # Add trade points and annotations
     for index, row in trades.iterrows():
@@ -182,21 +281,13 @@ def show_indicator_rsi_strategy(ticker, buy_threshold = 30, sell_threshold = 70,
     fig.update_layout(showlegend=False, plot_bgcolor='white', height=plot_height, title=plot_title)
     fig.update(layout_xaxis_rangeslider_visible=False)
 
-    # Update x-axes and y-axes for the main chart
-    fig.update_xaxes(mirror=True, ticks='outside', showline=True, linecolor='black', gridcolor='lightgrey', row=1, col=1)
-    fig.update_yaxes(mirror=True, ticks='outside', showline=True, linecolor='black', gridcolor='lightgrey', row=1, col=1)
-
-    # Update x-axes and y-axes for the RSI subplot
-    fig.update_xaxes(mirror=True, ticks='outside', showline=True, linecolor='black', gridcolor='lightgrey', row=2, col=1)
-    fig.update_yaxes(mirror=True, ticks='outside', showline=True, linecolor='black', gridcolor='lightgrey', row=2, col=1)
-
     if add_strategy_summary:
         t= backtest.trades_summary
         trade_text = f"Trades: {t['number_of_trades']}<br>"\
         f"Win ratio: {t['win_ratio(%)']}%<br>"\
         f"Average result: {t['average_res(%)']}%<br>"\
         f"Median result: {t['median_res(%)']}%<br>"\
-        f"Average trade length: {round(t['average_trade_len(days)'], 0)} days<br>"\
+        f"Average trade lenght: {round(t['average_trade_len(days)'], 0)} days<br>"\
         f"Cumulative result: {round(t['cumulative_result'], 2)}x<br>"\
         f"Profitable trades mean: {t['profitable_trades_mean']}%<br>"\
         f"Profitable trades median: {t['profitable_trades_median']}%<br>"\
@@ -206,16 +297,9 @@ def show_indicator_rsi_strategy(ticker, buy_threshold = 30, sell_threshold = 70,
         # Add a larger textbox using annotations
         fig.add_annotation( go.layout.Annotation( x=tex_loc[0], y=tex_loc[1], xref='paper', yref='paper', text=trade_text, showarrow=True, arrowhead=4, ax=0, ay=0, bordercolor='black', borderwidth=2, bgcolor='white', align='left', font=dict(size=14, color='black')))
 
-
-    # Add RSI line
-    fig.add_trace(go.Scatter(x=tdf['date'], y=tdf['rsi'], line=dict(color='green', width=2), name='RSI'), row=2, col=1)
-    fig.add_shape(type="line", x0=tdf['date'].min(), x1=tdf['date'].max(), y0=buy_threshold, y1=buy_threshold, line=dict(color="black", width=2, dash="dash"), row=2, col=1)
-    fig.add_shape(type="line", x0=tdf['date'].min(), x1=tdf['date'].max(), y0=sell_threshold, y1=sell_threshold, line=dict(color="black", width=2, dash="dash"), row=2, col=1)
-
-
     # Show the plot
     return (fig)
 
 
-# Test
-# show_indicator_rsi_strategy('TSLA', 30,80)
+#ticker= 'AAPL'
+#show_indicator_goldhand_line_strategy(ticker, plot_title=tw.get_plotly_title(ticker), ndays=700, plot_height=1000)

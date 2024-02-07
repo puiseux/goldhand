@@ -1,0 +1,1579 @@
+#!/usr/local/bin/python
+#coding: utf-8 -*-
+
+"""
+Created on 11 mai 2012
+
+@author: puiseux
+"""
+from array import array
+import sys, math  # , os
+
+from numpy import (sin, cos, ones, linspace, zeros, average, matrix, pi,
+                   ndarray, asarray, cross, where, vstack, argmin, nan)
+from numpy.linalg.linalg import norm, det
+from path import Path
+from plotly.offline import plot
+from pytictoc import TicToc
+from scipy import random
+from scipy.interpolate import (SmoothBivariateSpline,)
+from scipy.interpolate.fitpack2 import InterpolatedUnivariateSpline
+from scipy.optimize import  minimize_scalar
+from shapely import speedups
+import pyvista as pv
+import vtk
+if vtk.vtkVersion.GetVTKMajorVersion() >= 9 :
+    from vtkmodules.vtkIOXML import vtkXMLPolyDataWriter
+# else :
+#     from vtkmodules.vtkIOXMLPython import vtkXMLPolyDataWriter
+
+# from aperoconfig import RUNS_DIR  # , DATA_DIR
+# from inout.format import fmt, formData
+# from maillage.vtk_nervures.vtkUtilitaires import toVtkPolyData
+import numpy as np
+import numpy.linalg as LA
+import plotly.graph_objs as go
+# from preferences import AperoPrefs
+# from preferences import GraphicsPrefs
+from debog import className, clickableLink, stack, debug, mexit, rdebug#, className, ppprint, stack
+from utils import (absCurv, diff, computeCordeAndNBA, dist,
+    prodScal, iterable)
+
+# from inout.format import fmt
+speedups.enable()
+# OUTPUT = RUNS_DIR/'trash'
+
+def distPtSeg3D(pnt, pt1, pt2):
+    """ distance d'un point à un segment en 3D """
+    pt_proj = projPerp3d(pnt, [pt1, pt2])
+    return dist(pt_proj, pnt)
+
+def pointsLesPlusProches3d(pt,tab):
+    """ Recherche de l'indice i tel que tab(i) et tab(i+1) soient les deux points les plus proches de pt
+        - on cherche le point le plus proche, d'indice i
+        - on détermine lequel des points i+1 ou i-1 est le plus proche de pt
+    """
+    i1,dpt1 = pointLePlusProche3d(tab,pt,True)
+
+    if 0<i1<(len(tab) - 1):
+        dpt1p1 = dist(pt,tab[i1+1])
+        dpt1m1 = dist(pt,tab[i1-1])
+        if dpt1p1 <= dpt1m1:
+            i = i1
+        else:
+            i = i1-1
+    elif  i1==0:
+        i = i1
+    elif i1==len(tab)-1:
+        i = i1-1
+    return i
+
+def pointLePlusProche3d(points,P,return_distances_array=False):
+    """
+    Parametres:
+    ----------
+    - points : ndarray, tableau de n points 3d de shape (n,3)
+    - P : un point 3d de type QPointF, QPoint ou tuple ou liste (x,y)
+    retourne l'indice dans points, du point le plus proche de P
+    Retourne (i, distances)
+    --------
+    - i : l'indice dans 'points' du point qui réalise le min
+    - distance : la distances de P à points
+    """
+    X,Y,Z=P[0],P[1],P[2]
+    distances=[dist(point,(X,Y,Z)) for point in points]
+    index=argmin(distances)
+    if return_distances_array :
+        return index,distances
+    else :
+        return index,distances[index]
+
+def projPerp3d(pt,tab):
+    """ Calcul d'un point M projeté perpendiculairement sur un tableau de points 3D
+        Entrées :
+            pt : point à projeter
+            tab : liste des points
+        Sorties :
+            ptproj : coordonnées du point projeté
+        On recherche les deux points pt1, pt2 de la liste tab les plus proches
+        du point pt et on projète pt sur la droite (pt1, pt2)
+    """
+    ''' Recherche pt1,pt2 '''
+    i = pointsLesPlusProches3d(pt,tab)
+    pt1,pt2 = tab[i],tab[i+1]
+    ''' Projection pt sur (pt1, pt2) '''
+    eps = 1.0e-8
+    xm,ym,zm = pt[0],pt[1],pt[2]
+    x1,y1,z1 = pt1[0],pt1[1],pt1[2]
+    x2,y2,z2 = pt2[0],pt2[1],pt2[2]
+    x21,y21,z21 = x2-x1,y2-y1,z2-z1
+    if abs(x21)<eps and abs(y21)<eps and abs(z21)<eps:#pt1 et pt2 identiques
+        x,y,z = x1,y1,z1
+    else:
+        t = ( x21*(xm-x1) + y21*(ym-y1) + z21*(zm-z1) )/(x21*x21 + y21*y21 + z21*z21)
+        x = x1 + t*x21
+        y = y1 + t*y21
+        z = z1 + t*z21
+
+    return [x,y,z]
+
+
+
+def computeSurfaces(points, closed):
+    """
+    Calcul des surfaces des panels définis par points
+    :param points:ndarray((nbn, nbpn,3), float) des points 3d d'un maillage régulier
+    Les panels sont délimités par points[i,j] points[i+1,j], points[i+1,j+1], p[i,j+1]
+    :param closed: bool
+        True si le bord de fuite est en double (points[k,-1]==points[k,0])
+            c'est le cas d'un maillage aerodynamique
+        False sinon, c'est le cas du maillage elastique.
+            Dans ce cas, il faut rajouter un panel au bout de chaque caisson
+    """
+    nbn, nbpn,_ = points.shape #ici les nervures sont fermées en BF... ou pas
+#     debug(shape_points=(nbn,nbpn))
+    nbcais = nbn-1
+    points = points.view().reshape((-1,3))
+    nbpanels = nbcais*(nbpn-1) if closed else nbcais*nbpn
+#     debug(points=points.shape, nbpanels=nbpanels)
+    surf = zeros(nbpanels)
+#         debug(nbc=nbc, nbpn=nbpn, points=shape, surf=surf.shape)
+#         debug(self_nbp=nbp, self_nbn=nbn, self_nbpn=nbpn)
+#         exit()
+    for ip, panel in enumerate(panels((nbn, nbpn), closed)):
+#         if ip>=nbpanels-1 : debug(ip=ip, panel=panel)
+        sommets = [points[k] for k in panel]
+        surf[ip] = airePanel(*sommets)
+#             debug(p=p, panel=panel, surf=surf[p])
+#         celldata['surfaces'] = surf
+#         mesh.celldata = celldata
+    return surf
+
+
+def doublons(points, voisinages=None, eps=1.0e-8, sym=True):
+    """
+    Verifier s'il y a des points doubles dans points.
+    Paramètres :
+    ----------
+    :param points : ndarray(nbp,3) nbp points 3d. nbp peut être une
+        shape (nl, nc, 3) et dans ce cas nbp = nl*nc
+    :param voisinages: ndarray(shape=(np,1+nv), dtype=int) np numéros de points,
+        faisant référence au tableau 'points', chacun des np points à
+        vérifier possède nv voisins. voisinage est donc de la forme
+        [
+         [k_0,  v_0_1,  v_0_2, ...,  v_0_nv],
+         [k_1,  v_1_1,  v_1_2, ...,  v_1_nv],
+         ...
+         [k_np, v_np_1, v_np_2, ..., v_np_nv]
+        ]
+        les valeurs k_i, v_i_j sont des entiers entre 0 et nbp-1
+    :param eps : float. deux points p,q sont considérée comme confondus si dist(p,q)<eps
+    :param sym : bool. True si i voisin de j <==> j voisin de i. Divise par deux
+        le travail.
+
+    Retourne :
+    --------
+    :return : une liste de doublons (d_0,dd_0), ... (d_n, dd_n)
+    """
+    if voisinages is None:
+        voisinages = []
+
+    def cond(v,k):
+        if sym : return v>k
+        else : return v!=k
+
+    qoints=points.view()
+    qoints.shape=(qoints.size//3,3)
+    nbp=qoints.shape[0]
+    if voisinages:
+        voisinages=asarray(voisinages)
+#        debog(whoami(), voisinages.shape)
+        nbp=voisinages.shape[-1]
+        voisinages.shape=(-1,nbp)
+    else :
+        if sym :
+            voisinages=asarray([[i]+list(range(i,nbp)) for i in range(nbp)])
+        else :
+            voisinages=asarray([[i]+list(range(nbp)) for i in range(nbp)])
+
+    doublons=[]
+    for voisinage in voisinages:
+        k,voisins=voisinage[0],voisinage[1:]
+        point=qoints[k]
+        for voisin in voisins :
+            if cond(voisin,k) :
+                if np.linalg.norm(point-qoints[voisin])<eps :
+                    doublons.append((k,voisin))
+    return doublons
+
+def quadToPoint(shape, celldata):
+    """
+    Transformer 'celldata', de type CellData(QUAD), en PointData,
+        en répartissant celldata[k] sur les 4 sommets du panel k
+    :param shape : (nbn, nbpn, dim)= nb nervures, nb points par nervure,dim=1 ou 3
+        (doit provenir de l'elasticité, bf n'est pas en double, nbpn=85)
+    :param celldata : np.ndarray((N,dim)) ou CellData(), avec N=(nbn-1)*nbpn
+    ATTENTION:les numeros de points dans les panels sont des numéros de la geométrie aero,
+    ie dans le tableau de points aero, de shape (nbn_aero, nbpn_aero,3)
+    ou nbpn_aero est le nb de points par nervure de la géométrie aero, (ou le bf est en double)
+    nbpn_aero = nbpn_elasto+1
+
+    """
+    vshape = celldata.shape
+    if len(shape)==2 : nbn, nbpn_e = shape
+    elif len(shape)==3: nbn, nbpn_e, _ = shape #nb nerv, nb pt par nerv, 3, maillage elastique
+#     nbpn_a = nbpn_e+1
+#     debug(shape=shape)
+    N = (nbn-1)*nbpn_e#nb panels QUAD
+#     rdebug(vshape=vshape, shape_e=shape, nbn=nbn, nbpn_e=nbpn_e, nbpanels=N)
+    if vshape[0] != N :
+        msg = "Erreur de dimension : celldata doit etre de shape (%d) ou (%d,%d) ou (%d,%d). Or il est de shape %s"%(N,N,1,N,3,str(vshape))
+        raise ValueError(msg)
+    pointdata = zeros(shape).reshape((nbn*nbpn_e,-1))
+#     debug(pointdata=pointdata.shape, celldata=celldata.shape)
+    for p, panel in enumerate(panels(shape, closed=False)):
+#         if p>=255 : continue
+        v = 0.25*celldata[p]
+#         if p <= 4000 :
+#             debug('panel %d'%p,panel=panel, dF=v)
+        for k_e in panel : #ka=indice aero ke=indice elasto
+#             k_a = e2a(k_e)
+            pointdata[k_e] += v
+#             if p <= 4 :
+#                 print 'pointdata[%d]='%k_e,pointdata[k_e]
+#     debug(pointdata=pointdata.shape)
+#     mexit()
+    return pointdata
+
+def symetriser(points, sym):
+    """
+    Symetrie in situ de 'points' par rapport à un des plan Oxy, Oyz ou Oxz
+    Parametres:
+    ----------
+        - points = np.ndarray de shape (m,n,...,3) ou (m,n,...,2)
+        - sym = un chaine de caracteres pour indiquer l'orientation.
+            sym contient au plus 3 caracteres parmi {'x','y','z'}
+            si sym contient 'x' les points sont transformés [x,y,z] -> [-x,y,z] (points est symétrisé par rapport au plan Oyz)
+            si sym contient 'y' les points sont transformés [x,y,z] -> [x,-y,z] (points est symétrisé par rapport au plan Oxz)
+            si sym contient 'z' les points sont transformés [x,y,z] -> [x,y,-z] (points est symétrisé par rapport au plan Oxy)
+    """
+
+    shape = points.shape
+    dim = shape[-1]#2d ou 3d
+    if not dim in (2,3) : return points
+    vpoints = points.view()
+    vpoints.shape = -1,dim # on remet a plat sauf sur la dimension. vpoints est une liste (simple) de points 2D ou 3D
+    sym = sym.lower()
+    if 'x' in sym : vpoints[:,0] *= -1
+    if 'y' in sym : vpoints[:,1] *= -1
+    if dim==3 and 'z' in sym : vpoints[:,2] *= -1
+    return points
+
+def symetrieAxe(points,axe,centre=0.0):
+    """
+    symetrie
+    - d'axe 'axe' = 0 (vertical) ou 1 (horizontal)
+    - de centre 'centre', réel
+    X = 2*centre - X pour axe vertical
+    Y = 2*centre - Y pour axe horizontal
+    points est modifié in situ.
+    """
+#     debug(points.shape, axe, centre)
+    points.shape=(-1,2)
+    points[:,axe]*=-1
+    if centre !=0.0 : points[:,axe]+=2*centre
+    return points
+
+def normale(a, b, c, d=None):
+    """DIMENSION 3 : calcule la normale à un panel, un plan, un triangle, sens direct"""
+    if d is None:#triangle, pas de pb
+        v = np.cross(b-a, c-a)
+
+    #les milieux des 4 segments sont coplanaires, on prend la normale à ce plan
+    #c'est egalement le produit vectoriel (c-a)vect(b-d)
+#     m1, m2, m3 = 0.5*(a+b),0.5*(b+c),0.5*(c+d)#,0.5*(d+a)
+    else :
+        v = np.cross(a-c, b-d)
+    return v/np.linalg.norm(v)
+
+def panels(shape, closed=False):
+    """
+    un generateur qui parcourt les panels d'un tableau de points de shape 'shape' dans le sens direct
+    un generateur renvoit les éléments les uns après les autres SANS créer explicitement la liste des éléments
+    => economie memoire
+    'shape' represente une famille de nervures consécutives.
+    Tous les tableaux 'points((nbn, nbpn,3))' de Axile ont cette shape.
+    Le tableau peut representer des nervures fermées (closed=True) en BF (points[k,0] == points[k,-1])
+    ou bien ouvertes (closed=False)  (points[k,0] != points[k,-1])
+    :param shape : tuple = (nbn, nbpn,3)
+    :param closed : bool True si le BF est en double, False sinon
+    :return : les panels de 'points' sous la forme de 4 numeros de points A,B,C,D
+    --------
+    Utilisation :
+    -----------
+    >>> shape = (10,20,3)
+    >>> for panel in panels(nervures, False) :
+    >>>     print panel
+    """
+    nbn = shape[0]#nb nervures
+    nbpn = shape[1]#nb points par nervure
+    kcais = 0
+    while kcais < nbn-1:
+        N1 = list(range(kcais*nbpn, (kcais+1)*nbpn))#Des numeros de points
+        N2 = list(range((kcais+1)*nbpn, (kcais+2)*nbpn))
+        kpan = 0
+#         debug(caisson=kcais, kpan=kpan)
+        while kpan < nbpn-1 :
+            yield N1[kpan], N2[kpan], N2[kpan + 1], N1[kpan + 1]
+            kpan += 1
+
+        if not closed :#Cas particulier : le dernier panel du caisson kcais
+            yield N1[-1], N2[-1], N2[0], N1[0]
+        kcais += 1
+
+def airePanel(a,b,c,d, precis=True):
+    """
+    Calcul de la surface du panel en DIMENSION 3 (quadrilatere abcd) comme la somme des aires de deux triangles.
+        Il y a deux manières de decouper le panel en deux triangles : (BAD et BCD) ou bien (ABC et ACD)
+        Les surfaces correspondantes étant S1 et S2, et en supposant que les points sont
+        A:[0,0,0]$B:[1,0,0]$C:[0,1,0]$D:[1,1,h],
+        Si h<<1 (quadrilatere presque plat), on a
+            S1 ~ 1+0.75 h^2, et
+            S2 ~ 1+0.25 h^2 et
+            S1-S2 ~ 0.5 h^2 et
+            (S1-S2)/S2 ~ 0.5 h^2.
+    j'utilise S2
+    Si precis=True, je calcule l'aire du quadrilatere plan constitué par
+    les 4 milieux (ils sont coplanaires) et j'y rajoute les 4 petits triangles.
+    """
+    if precis :
+        m1 = 0.5*(a + b)
+        m2 = 0.5*(b + c)
+        m3 = 0.5*(c + d)
+        m4 = 0.5*(d + a)
+        return airePanel(m1, m2, m3, m4, precis=False)\
+            + aireTriangle(a, m1, m4) + aireTriangle(b, m2, m1)\
+            + aireTriangle(c, m3, m2) + aireTriangle(d, m4, m3)
+    else :
+        return aireTriangle(a, b, c) + aireTriangle(a, c, d)
+
+def aireTriangle(a,b,c):
+    """
+    Aire du triangle abc dans l'espace.
+    C'est la moitié de la norme du produit vectoriel ab vect ac
+    beaucoup plus rapide que son equivalent numpy :
+    >>> return norm(cross(b-a, c-a))*0.5
+    (sauf vectorisation, bien sûr)
+    """
+#     print(a.shape)
+    u, v = b-a, c-a
+    r = u[2]*v[0]-u[0]*v[2]
+    s = u[0]*v[1]-u[1]*v[0]
+    t = u[1]*v[2]-u[2]*v[1]
+    return 0.5*np.sqrt(r*r + s*s + t*t)
+
+def centreGCloison(P, surface=False):
+    """Centre de gravité d'une plaque 3d, PLANE, de densité surfacique constante,
+     délimitée par un contour polygonal P"""
+    O = average(P, 0)#Le centre de G des masses ponctuelles
+#     debug(O=O)
+    T = zeros((len(P)-1,3))
+    S = zeros((len(P)-1,1))
+    for i,(A,B) in enumerate(zip(P[1:],P[:-1])) :
+        T[i] = O+A+B#3 fois le centre de G du triangle OAB
+        S[i] = aireTriangle(O,A,B)
+#     print('triangles',fmt(T.tolist()))
+#     print('surfaces', fmt(S.tolist()))
+    surf = sum(S)
+    CG = (sum(T*S)/surf)/3.0
+    if surface :
+        return CG, surf
+    else :
+        return CG
+
+def centreGTrados(P, Q, sens=0, surface=True):
+    """Centre de gravité d'une plaque de densité surfacique constantee,
+     délimitée par deux contours polygonaux P1, P2 tels que
+     - P1 et P2 ont le même nombre de points
+     - P1 et P2 sont presque parallèles, et ressemblants comme 2 nervures
+         consécutives. Dans ce cas, retourne le centre de G des deux trados"""
+#     O = average(P, 0)#Le centre de G des masses ponctuelles
+    T = zeros((2*len(P)-2, 3))
+    S = zeros((2*len(P)-2, 1))
+    j = 0
+    if sens == 0 :
+        for (p0,p1,q0,q1) in zip(P[1:],P[:-1],Q[1:],Q[:-1]) :
+            T[j] = p0+q1+q0#3 fois le centre de G du triangle p0,q1,q0
+            S[j] = aireTriangle(p0,q1,q0)
+            j += 1
+            T[j] = p0+p1+q1
+            S[j] = aireTriangle(p0,p1,q1)
+            j += 1
+    else :
+        for (p0,p1,q0,q1) in zip(P[1:],P[:-1],Q[1:],Q[:-1]) :
+            T[j] = q0+p0+p1#3 fois le centre de G du triangle p0,q1,q0
+            S[j] = aireTriangle(q0,p0,p1)
+            j += 1
+            T[j] = q0+p1+q1
+            S[j] = aireTriangle(q0,p1,q1)
+            j += 1
+    surf = float(sum(S))
+    CG = (sum(T*S)/surf)/3.0
+    if surface :
+        return CG, surf
+    else :
+        return CG
+
+def XYZ(points):
+    """Pour ne pas avoir à écrire sans arrêt
+    X,Y,Z=points[:,0],points[:,1],points[:,2]
+    on écrit X,Y,Z = XYZ(points)
+    """
+    return points[:,0],points[:,1],points[:,2]
+
+def codesCouleurs(colors):
+    """Convertit couleurs en codes compatibles du plot
+
+    Plotly default colors:
+    '#1f77b4',  # muted blue
+    '#ff7f0e',  # safety orange
+    '#2ca02c',  # cooked asparagus green
+    '#d62728',  # brick red
+    '#9467bd',  # muted purple
+    '#8c564b',  # chestnut brown
+    '#e377c2',  # raspberry yogurt pink
+    '#7f7f7f',  # middle gray
+    '#bcbd22',  # curry yellow-green
+    '#17becf'   # blue-teal
+    """
+    codes = []
+    for c in colors:
+        if c=='v': codes.append('#2ca02c')
+        if c=='o': codes.append('#ff7f0e')
+        if c=='r': codes.append('#d62728')
+        if c=='j': codes.append('#bcbd22')
+        if c=='m': codes.append('#9467bd')
+    return codes
+
+def sizCouleurs(colors):
+    """Renvoie une taille du point en fonction de sa couleur"""
+    siz = []
+    for c in colors:
+        if c=='v': siz.append(10)
+        if c=='o': siz.append(5)
+        if c=='r': siz.append(5)
+        if c=='j': siz.append(5)
+        if c=='m': siz.append(5)
+    return siz
+
+def structuredGrid(nx,ny,nz,delta=-1):
+    """
+    retourne un tableau np.ndarray de shape(nx,ny,nz,3)
+
+    produit tensoriel de X=(x_1,x_2,...x_nx), Y=(y_1,y_2,...y_ny)
+    et Z=(z_1,z_2,...z_nz), aléatoirement espacés, mais triés.
+    ou bien régulièrement espacés
+    Contrainte : nx>1, ny>1, nz>1
+    """
+#    nx,ny,nz = shape
+    if delta==-1 :
+        X=np.random.random(nx)
+        Y=np.random.random(ny)
+        Z=np.random.random(nz)
+        X.sort()
+        Y.sort()
+        Z.sort()
+    else :#TODO: delta=dx,dy,dz
+        dx,dy=1.0/(nx-1),1.0/(ny-1)
+        X=np.arange(0.0,1.0+dx,dx)
+        Y=np.arange(0.0,1.0+dy,dy)
+    if nz==1 :
+        Z=np.asarray([0.0])
+    else :
+        dz=1.0/(nz-1)
+        Z=np.arange(0.0,1.0+dz,dz)
+    G=np.ndarray((nx,ny,nz,3),dtype=float)
+    for i,x in enumerate(X) :
+        for j,y in enumerate(Y) :
+            for k,z in enumerate(Z) :
+                G[i,j,k,:]=[x,y,z]
+    return G
+
+class Rotation(object) :
+    """"
+    Une classe qui modelise les rotations dans l'espace.
+    """
+    def __init__(self, alfa, centre, axe) :
+        """
+        - alfa : float, angle de la rotation (en radians) ou bien (float, float) = (cos(a), sin(a))
+        - centre : np.ndarray de shape (3,), le centre de la rotation
+        - axe : np.ndarray de shape (3,), l'axe de la rotation (peut être de norme != 1)
+        """
+        if isinstance(alfa, tuple) :
+            self.cosa, self.sina = alfa
+            self.alfa = None
+        elif isinstance(alfa, (float, int)) :
+            self.cosa = cos(alfa)
+            self.sina = sin(alfa)
+            self.alfa = alfa
+#         if centre is None  : rstack()
+#         debug(alfa=className(alfa),centre=className(centre),axe=className(axe))
+        self._centre = asarray(centre).reshape((1,3))
+        self._axe = asarray(axe).reshape((1,3))
+        self.computeMatrice()
+
+    def __str__(self) :
+        infos = []
+        infos.append('cos(a)=%.2g, sin(a) = %.2g'%(self.cosa, self.sina))
+        if self.alfa is not None :
+            infos.append('alfa (deg) = %.2f'%(self.alfa*180/math.pi))
+        infos.append('centre     = %s'%self.centre)
+        infos.append('axe        = %s'%self.axe)
+        infos.append('Matrice    = \n%s'%self.matrice)
+        return '\n'.join(infos)
+
+    def computeMatrice(self) :
+        axe = self.axe
+#         centre = self.centre
+#         debug(axe=axe)
+        u = asarray(axe).reshape((3,))
+        u = u/LA.norm(u)
+        c, s = self.cosa, self.sina
+        c1 = 1-c
+        c1u0 = c1*u[0]
+        c1u1 = c1*u[1]
+        c1u01 = c1u0*u[1]
+        c1u02 = c1u0*u[2]
+        c1u12 = c1u1*u[2]
+        su0 = s*u[0]
+        su1 = s*u[1]
+        su2 = s*u[2]
+        R = np.matrix([[c+u[0]*c1u0, c1u01-su2    , c1u02+su1],
+                       [c1u01+su2  , c+u[1]*c1u1  , c1u12-su0],
+                       [c1u02-su1  , c1u12+su0    , c+u[2]**2*c1]]).transpose()
+        self.matrice = R
+#         print 'rotation : alfa, cos, sin, axe, centre\n',self.alfa, c, s, axe, centre
+#         print 'matrice rotation : =\n',R
+#         print 'matrice rotation : inverse-transpose=\n',R.I-R.T
+#         print 'det R=',LA.det(R)
+        return R
+
+    def apply(self, X):
+        """
+        Applique la rotation à X. Modifie X lui-même.
+        Si R est une instance de Rotation, et X un vecteur (1,3)
+        R.apply(X) <==> R(X)
+        """
+#         debug(centre_X=(self.centre,X))
+        X -= self.centre
+#         debug(centre_X=(self.centre,X))
+        X[:,:] = X*self.matrice
+#         debug(centre_X=(self.centre,X))
+        X += self.centre
+        return X
+    __call__=apply
+    @property
+    def centre(self):
+        return self._centre
+    @centre.setter
+    def centre(self, c):
+        raise AttributeError("On ne change pas une rotation, on la reconstruit")
+    @property
+    def axe(self):
+        return self._axe
+    @axe.setter
+    def axe(self, c):
+        raise AttributeError("On ne change pas une rotation, on la reconstruit")
+
+class Polyline3D(object):
+    """Polyline3D. Un spline paramétrique 3d sommaire.
+    a vocation à être initialisée, mais  modifiée avec précaution car
+    Le calcul des centre, encombrement, périmetre, spline etc.
+    N'EST PAS MIS A JOUR
+    marker et mode sont des préférences pour le plot()
+    paramètres autorisés dans __init__() et load()
+    """
+#     ALLOWED_KEYS = ['points', 'name','role','parent']
+    DEFAULT = dict(cpoints=ndarray((0,3), dtype=float),
+                   name='', role='none', parent=None, precision=150,
+                   k=AperoPrefs.SPLINE_DEGREE)
+    prefs = GraphicsPrefs
+    def __init__(self, *args, **kargs):
+#     def __init__(self, points=None, role=None, parent=None, name=''):
+        self.spline = None
+        dump = self.DEFAULT.copy()
+        """Constructeur vide Polyline3D()"""
+        """Constructeur recopie Polyline3D(une_instance_de_Polyline3D, name=..)"""
+        if len(args)>1:
+            msg = """
+    Un seul argument non nommé autorisé, doit être de type Polyline3D.
+        pour constructeur recopie.
+        Ici, on a %d arguments non nommés de types : %s"""\
+            %(len(args),[className(a) for a in args])
+            raise TypeError(msg)
+        elif len(args)==1 :
+            #Un seul args, de type Polyline3D => constructeur recopie
+            if isinstance(args[0], Polyline3D):
+                dump.update(args[0].toDump())
+            else :
+                msg = """
+    Un seul argument non nommé autorisé, doit être de type Polyline3D (pour constructeur recopie.)
+        Ici, 1 argument non nommé de type %s"""%(className(args[0]))
+                debug(msg)
+                raise TypeError
+        dump.update(kargs)
+        self.load(dump)
+        if self.cpoints.shape[0]>2 : self.update()
+
+    def __call__(self, t, k=0):
+#         debug(t=t)
+#         debug('dx%d(%s) = %s'%(k,t,self.x(t,k)))
+        if isinstance(t, (list, tuple, ndarray, array))  :
+            return asarray(list(zip(self.x(t,k), self.y(t,k), self.z(t,k))))
+        elif isinstance(t,(int, float)) :
+            return asarray((self.x(t,k), self.y(t,k), self.z(t,k)))
+
+    @property
+    def dpoints(self):
+        if self.spline is None :
+            return self.cpoints
+        else :
+            return self(linspace(0,1,self.precision))
+
+    def toDump(self):
+        return dict(points=self.cpoints, role=self.role, name=self.name)
+
+    def load(self, dump):
+        """Normalement self.load(self.toDump()) ne modifie pas self"""
+        try : dump['cpoints'] = dump.pop('points')
+        except KeyError : pass
+        for key, value in list(dump.items()):
+            setattr(self, key, value)
+
+    def update(self):
+        self._centre = self.isoBarycentre.reshape(1,3)
+        self.computeAbsCurv()
+        self.computeSpline()
+
+    @property
+    def isoBarycentre(self):
+        """
+        Calcule et retourne l'isobarycentre des masses ponctuelles égales, placées aux points de 'X'
+        X est un np.ndarray de shape n,3
+        """
+        return average(self.cpoints,0)#.reshape(1,3)
+    centre=isoBarycentre
+
+    @property
+    def perimetre(self):
+        """Longueur du contour"""
+        return self.abscurv[-1]
+
+    @property
+    def x(self):
+        """spline x(t)"""
+        return self.spline[0]
+
+    @property
+    def y(self):
+        """spline y(t)"""
+        return self.spline[1]
+
+    @property
+    def z(self):
+        """spline z(t)"""
+        return self.spline[2]
+
+    @property
+    def points(self):
+        _ = """La @property points n'existe plus.
+    Soit on a besoin des points de contrôle, dans ce cas,
+        remplacer les appels à 'points' par des appels à 'cpoints'
+    Soit on a besoin de points de la spline particulier, dans ce cas,
+        remplacer les appels à points par des appels à self(T) où
+        T est un ndarray(n,1) d'abscisse curvilignes le long de self."""
+        return self.cpoints
+
+    def info(self):
+        infos = ['<'+self.__class__.__name__+'>']
+        infos.append('    shape = '+str(self.cpoints.shape))
+        if self.cpoints.shape[0] <=3 :
+            infos.append('    Pas de spline')
+            return infos
+        (mx,my,mz), (Mx, My, Mz) = self.encombrement()#(mx,my,mz), (Mx, My, Mz)
+        infos.append('points:')
+        infos.append('    x dans [%.3g, %.3g]'%(mx,Mx))
+        infos.append('    y dans [%.3g, %.3g]'%(my,My))
+        infos.append('    z dans [%.3g, %.3g]'%(mz,Mz))
+        ((mx,my,mz), (Mx, My, Mz)), ((tmx,tmy,tmz), (tMx, tMy, tMz)) = self.encombrement('spline')
+        infos.append('splines:')
+        infos.append('    x dans [%.3g, %.3g], t = [%.3g, %.3g]'%(mx,Mx, tmx, tMx))
+        infos.append('    y dans [%.3g, %.3g], t = [%.3g, %.3g]'%(my,My, tmy, tMy))
+        infos.append('    z dans [%.3g, %.3g], t = [%.3g, %.3g]'%(mz,Mz, tmz, tMz))
+        infos.append('dx, dy, dz=%s'%(str(self.encombrement1())))
+
+#         infos.append('platitude = %g'%(self.platitude()))#très cher !
+        return infos
+
+    def __str__(self):
+        return '\n'.join(self.info())
+
+    def encombrement(self, mode='points'):
+        if mode=='points' : return encombrement(self.cpoints)
+        elif mode=='spline' : return self._encombrementSpline()
+
+    def _encombrementSpline(self):
+        """Encombrement sous forme V,T
+        V = [(min(x),min(y),min(z)), (max(x),max(y),max(z))]
+        T = [(tmx, tmy, tmz), (tMx, tMy, tMz)]
+        où
+            - tmx est la valeur du parametre t pour lequel x est minimale, tmx dans [0,1],
+            - tMx est la valeur du parametre t pour lequel x est maximale, tMx dans [0,1],
+        etc...
+        """
+        VE, TE = np.ndarray((2,3)), np.ndarray((2,3))
+        for i in (0,1,2):#,1,2) :
+            s = self.spline[i]
+            result = minimize_scalar(s,bounds=(0.0,1.0),
+                                     method='Bounded',
+                                     options={'disp':False, 'maxiter':200})
+            VE[0,i], TE[0,i] = result['fun'], result['x']
+            result = minimize_scalar(lambda t:-s(t),bounds=(0.0,1.0),
+                                     method='Bounded',
+                                     options={'disp':False, 'maxiter':200})
+            VE[1,i], TE[1,i] = -result['fun'], result['x']
+#         self.TE = TE
+        return VE, TE
+
+    def encombrement1(self):
+        """encombrement sous forme dx, dy, dz"""
+        return encombrement1(self.cpoints)
+
+    def translate(self, u):
+        """
+        Effectue, IN-SITU, une translation de vecteur u et met à jour les
+        differents éléments
+        :param u': list(float,float,float) [x,y,z]
+            ou bien ndarray de shape (1,3) ou (3,1),
+            est le vecteur de la translation
+        :return u.
+        """
+        u1 = asarray(u).reshape((3,))
+        self.cpoints += u1
+        self.update()
+        return u1
+
+    def rotate(self, alfa=None, centre=None, axe=None, rot=None):
+        """
+        Effectue, IN-SITU, une rotation (de centre C='centre', d'axe u='axe', d'angle a='alfa'),
+            pour tous les points de X='points'.
+            ou bien la rotation rot
+        :param alfa: float, l'angle en radians
+        :param centre : list de 3 reels [x,y,z] ou ndarray((1,3)) ou ndarray((3,1))
+            c'est le centre de la rotation
+        :param axe: list de 3 reels [x,y,z] ou ndarray de shape (1,3) ou (3,1),
+            est l'axe de la rotation, non normalisé.
+        Retourne la Rotation.
+        --------
+        """
+        if rot is None :
+            rot = Rotation(alfa, centre, axe)
+        elif not isinstance(rot, Rotation) :
+            msg = self.__doc__+"""
+            le parametre 'rot' est de type %s, il doit etre de type Rotation.
+            sinon, precisez les trois parametres 'alfa' , 'centre' et 'axe'
+            de la rotation"""%(className(rot))
+            raise TypeError(msg)
+        self.cpoints = rot(self.cpoints)
+        self.update()
+        return rot
+    nbappelsplatitude=0
+
+    def platitude(self):
+        """
+        ATTENTION, coute cher !!
+        Détermine un coefficient de platitude du polyligne.
+        (platitude=0.0 si les points sont coplanaires)
+        On parcours tous les tetrahedres T(i,j,k)=A,Xi,Xj,Xk. où A=X[0]
+        On calcule le volume Vt(i,j,k) de T(i,j,k).
+        On calcule la sphere circonscrite S(i,j,k) et son volume Vs(i,j,k)
+
+        Si T est grand (4 aretes de meme longueur) alors Vs=Vt.3.pi.sqrt(3).
+        T est 'plat' si 3.pi.sqrt(3).Vt/Vs est petit devant 1.
+        On fait la moyenne des coefficients a(i,j,k) = 3.pi.sqrt(3).Vt(i,j,k)/Vs(i,j,k)
+        """
+        self.nbappelsplatitude += 1
+        if self.nbappelsplatitude <10 :
+            stack('nbappelsplatitude=%d'%self.nbappelsplatitude)
+        n = len(self.cpoints)
+#         print n
+        X = self.cpoints
+        if n<=3 : return 0.0
+        A = X[0]
+        moy = 0.0
+        nt = 0
+        cs, cv = 4.0*math.pi/3.0, 3*math.pi*math.sqrt(3)
+        for i in range(1, n) :
+            B = X[i]
+            AB = B-A
+            for j in range(i+1, n):
+                C = X[j]
+                AC = C-A
+                for k in range(j+1, n) :
+                    D = X[k]
+                    AD = D-A
+                    nt += 1
+                    D = X[k]
+                    [I, r] = sphereCirconscriteA4Points(A, B, C, D)
+                    if I is not None :
+                        Vs = cs*r**3
+                        Vt = abs(det(AB, AC, AD))/6.0
+                        moy += cv*Vt/Vs
+        self._platitude = moy/nt
+        return moy/nt
+#scipy.interpolate.SmoothBivariateSpline(x, y, z, w=None, bbox=[None, None, None, None], kx=3, ky=3, s=None, eps=None)
+
+    def compute2DSpline(self, interpolated=None) :
+        """TODO : Calcul spline 2d ???Je ne sais pas à quoi ca sert, ni ce que j'ai voulu essayer..."""
+        if interpolated is None:
+            interpolated = [0, -1]
+        X = self.cpoints[:,0]
+        Y = self.cpoints[:,1]
+        Z = self.cpoints[:,2]
+        maxw = 100.0
+        weight = ones(len(self.cpoints))
+        for index in interpolated :
+            weight[index] = maxw
+        spl2d = SmoothBivariateSpline(X, Z, Y, w=weight, kx=3, ky=3, s=len(X)*1.0e-8)
+        self.spline2d = spl2d
+
+    def computeSpline(self) :
+        """
+        Calcule d'une spline cubique X(t),Y(t),Z(t) avec t dans [0,1].
+        qui interpole self.cpoints
+        """
+        t = self.abscurv/self.abscurv[-1]
+        if 0 :
+            dt = diff(t)
+            if min(dt) == 0.0 :
+                w = where(dt==0)
+                rdebug("Impossible de calculer ce polyligne 3d, %d point(s) double(s) sur %s points : %s"%(len(w[0]),t.shape[0],w[0].tolist()))
+                print('name ="%s"'%self.name,"role=%s"%self.role,'points_shape=',self.cpoints.shape, file=sys.stderr)
+                print("les abs. curv. :",fmt(t.tolist()))
+                print("les delta abs. curv. :",fmt(dt.tolist()))
+                print("les points :",self.points.tolist())
+    #             print(fmt(dt.tolist(),5))
+    #             print(argmin(dt), min(dt))
+                stack('role="%s"'%self.role)#,deep=10)
+                mexit()
+#         w = fmt(self.cpoints,5).tolist()
+#         w.sort()
+#         print(w)
+#         return
+
+        X = self.cpoints[:,0]
+        Y = self.cpoints[:,1]
+        Z = self.cpoints[:,2]
+        x = InterpolatedUnivariateSpline(t, X, k=self.k)
+#         debug(k=x.__dict__.keys())
+#         debug(k=x._data)
+#         mexit()
+        y = InterpolatedUnivariateSpline(t, Y, k=self.k)
+        z = InterpolatedUnivariateSpline(t, Z, k=self.k)
+        self.spline = [x, y, z]
+
+    def computeAbsCurv(self ):
+        self.abscurv = absCurv(self.cpoints)
+#         debug(len_abscurv=len(self.abscurv), len_points=len(self.cpoints))
+
+    def isFlat(self, eps=1.0e-8):
+        return self.platitude()<eps
+
+    def writeVTK(self, filename=sys.stdout):
+#         return
+        if isinstance(filename, str) :
+            filename = Path(filename).abspath()
+#             debug('sauvegarde %s'%filename)
+        nbp = len(self.cpoints)
+        cells = list(zip(list(range(nbp-1)), list(range(1,nbp))))
+        vtkpd = toVtkPolyData(self.cpoints, cells, type_='lines')
+        writer = vtkXMLPolyDataWriter()
+        writer.SetDataModeToAscii()
+        writer.SetFileName(filename)
+        writer.SetInputData(vtkpd)
+        writer.Update()
+        writer.Write()
+
+    def plot(self, show=True, data=None, filename=None):
+#         data = []
+if data is None:
+    data = []
+points = self.cpoints.view()
+        points.shape=(-1,3)
+        X, Y, Z = XYZ(points)
+        mode = self.prefs.mode
+        marker = self.prefs.marker
+        line = self.prefs.line
+
+        goP = go.Scatter3d(dict(x=X, y=Y, z=Z, text=list(range(len(X)))),
+                           mode   = mode[self.role],
+                           marker = marker[self.role],
+                           line   = line[self.role],
+                           name   = self.role,
+                           hoverinfo='name+x+z',
+                           showlegend=True
+                           )
+        data.append(goP)
+        if show :
+            layout = go.Layout(width = 1800, height = 1200,
+                               title = self.name,
+                               legend=dict(x=0.2,y=0.2),
+                               hovermode='closest')
+            if filename is None :
+                try : filename = self.pjdir/self.session+className(self)+'.html'
+                except : filename = RUNS_DIR/'trash'/className(self)+'.html'
+            figure = go.Figure(data=data, layout=layout)
+            plot(figure, show_link=True,
+                 link_text='Exporter vers plot.ly (pour édition)', filename=filename)
+            try : self.files.add(filename)
+            except : pass
+            return filename
+        else :
+            return data
+
+def plotNodesAndConnexions3d(P, C, pcolors=None, fcolor='red', scolor=None,
+                             filaire=True, surface=True, opacity=0.5, brilliant=None,
+                             titre='', show=True, saveas=None):
+    """
+    Plot pyvista, très rapide et simple.
+    A utiliser de préférence à plotly et matplotlib.
+    :param P: ndarray((-1,3), float), les n.xyz des points n à plotter
+    :param C:
+        1. list de list d'int, les connexions, ou cells, sous la forme [c1, c2, c3...]
+            chaque ci est une cellule de la forme ci=[i,j,k,...] contenant les numéros
+            des points de P constituant la cellule ci. Touts les ci doivent avoir
+            la même longueur len(ci) = le nb de points des cellules
+
+        2. dict() de la forme {2:C2, 3:C3, 4:C4, etc...} ou chaque Ci est de la
+            forme C donnéee au 1, le nombre de points des cellules de Ci
+            étant i
+
+    :param titre: str, titre
+    :param show: bool, True pour affichage immédiat, et False pour affichage différé.
+    :param colors : list de même len() que P, pour passer les couleurs des noeuds
+        si colors n'existe pas, on ne trace pas les points
+    :param filaire: tracé des connexions de coordinance 2  (2 noeuds)
+    :param surface: tracé des connexions surfaciques
+    :param opacity: opacité de cellssurfaces
+    :param brilliant: list de int, des numéros (n.num) de points à mettre en surbrillance
+    :param titre: str, titre
+    """
+    if pcolors is None:
+        pcolors = []
+    if scolor is None:
+        scolor = [255, 255, 255]
+    if brilliant is None:
+        brilliant = []
+    p = pv.Plotter(title=titre)
+#     debug(className(C), C.keys())
+    if not isinstance(C, dict) :
+        C = {2:C}
+
+    """Cells surface et connexions élastiques"""
+#     Cells = []
+    for nbn, nbncells in sorted(C.items()) :
+#         if nbn not in (range(15)) : continue
+#         Cnbn = [] #les connexions à nbn noeuds
+        Cnbn = asarray([(nbn, *nbnc) for nbnc in nbncells if len(nbnc)==nbn])
+#         Cells.append(asarray(Cnbn))
+        ''' Maillage points P '''
+        smesh = pv.PolyData(P, Cnbn)
+        if nbn==2 and filaire : # color, lw, tubes = 'red', 4
+            p.add_mesh(smesh, color=fcolor,style='wireframe',
+                       render_lines_as_tubes=True, line_width=3, label='ressorts')
+        elif (iterable(surface) and nbn in surface) or surface is True:
+            p.add_mesh(smesh, color=scolor,style='surface',show_edges=True,
+                       line_width=0.2, label='surface', opacity=opacity)
+
+    """Les points"""
+    if len(pcolors)>0:
+        setcolors = set(pcolors)
+        colors = asarray(pcolors)
+        Pv = P[where(colors=='v')]
+        Po = P[where(colors=='o')]
+        Pr = P[where(colors=='r')]
+        Pm = P[where(colors=='m')]
+        Pb = P[brilliant]
+    #     cmesh = pv.PolyData(P, vtkconnexions)
+        vmesh = pv.PolyData(Pv)
+        rmesh = pv.PolyData(Pr)
+        omesh = pv.PolyData(Po)
+        mmesh = pv.PolyData(Pm)
+        if brilliant : mmesh = pv.PolyData(Pb)
+        if len(Pv)>0 : p.add_mesh(vmesh, color='green', render_points_as_spheres=True, point_size=5, pickable=True, label='Axile')
+        if len(Pr)>0 : p.add_mesh(rmesh, color='red', render_points_as_spheres=True, point_size=4, pickable=True, label='intérieurs')
+        if len(Po)>0 : p.add_mesh(omesh, color='orange', render_points_as_spheres=True, point_size=4, pickable=True, label='grille')
+        if len(Pm)>0 : p.add_mesh(mmesh, color='magenta', render_points_as_spheres=True, point_size=4, pickable=True, label='trous')
+        if len(Pb)>0 : p.add_mesh(mmesh, color='red', render_points_as_spheres=True, point_size=20, pickable=True, label='brillant')
+#     p.add_mesh(cmesh, style='wireframe', render_lines_as_tubes=True, line_width=2, pickable=True)
+#     p.add_legend()
+
+#     print(p.mesh)
+    if show :
+        p.show()
+
+def plotNodesAndConnexions3dPieces(Plist, Clist, POSlist, pcolorss=None, fcolor='red', scolors=None,
+                                   point=True, filaire=True, surface=True, opacity=0.5,
+                                   titre='', show=True, saveas=None):
+    """
+    Plot pyvista, très rapide et simple.
+    A utiliser de préférence à plotly et matplotlib.
+    :param Plist: P pour chaque pièce = list de list de points = list de ndarray((-1,3), float), les n.xyz des points n à plotter
+    :param Clist: C pour chaque pièce
+        1. list de list d'int, les connexions, ou cells, sous la forme [c1, c2, c3...]
+            chaque ci est une cellule de la forme ci=[i,j,k,...] contenant les numéros
+            des points de P constituant la cellule ci. Touts les ci doivent avoir
+            la même longueur len(ci) = le nb de points des cellules
+
+        2. dict() de la forme {2:C2, 3:C3, 4:C4, etc...} ou chaque Ci est de la
+            forme C donnéee au 1, le nombre de points des cellules de Ci
+            étant i
+
+    :param titre: str, titre
+    :param show: bool, True pour affichage immédiat, et False pour affichage différé.
+    :param pcolorss : list de pcolors = list de list de même len() que P, pour passer les couleurs des noeuds
+        si pcolors n'existe pas, on ne trace pas les points
+    :param scolors : scolor pour chaque pièce = list des couleurs des pièces
+    :param point: tracé des points
+    :param filaire: tracé des connexions de coordinance 2  (2 noeuds)
+    :param surface: tracé des connexions surfaciques """
+    if pcolorss is None:
+        pcolorss = []
+    if scolors is None:
+        scolors = []
+    p = pv.Plotter(title=titre)
+#     debug(className(C), C.keys())
+
+    if not(len(Plist)==len(Clist)==len(pcolorss)==len(scolors)):
+        raise NotImplementedError('Plot3d impossible: incohérence dans les données des pièces (points,connexions,couleurs)')
+    else:
+        npieces = len(Plist)
+        for i in range(npieces):
+            P,C,POS,pcolors,scolor = Plist[i],Clist[i],POSlist[i],pcolorss[i],[c/255 for c in scolors[i]]
+
+            if not isinstance(C, dict) :
+                C = {2:C}
+
+            """Cells surface et connexions élastiques"""
+        #     Cells = []
+            for nbn, nbncells in sorted(C.items()) :
+        #         if nbn not in (range(15)) : continue
+        #         Cnbn = [] #les connexions à nbn noeuds
+                Cnbn = asarray([(nbn, *nbnc) for nbnc in nbncells if len(nbnc)==nbn])
+        #         Cells.append(asarray(Cnbn))
+                ''' Maillage points P '''
+                smesh = pv.PolyData(P, Cnbn)
+
+                if nbn==2 and filaire : # color, lw, tubes = 'red', 4
+                    p.add_mesh(smesh, color=fcolor,style='wireframe',
+                               render_lines_as_tubes=True, line_width=2, label='ressorts')
+                elif (iterable(surface) and nbn in surface) or surface is True:
+                    p.add_mesh(smesh, color=scolor,style='surface',show_edges=True,
+                               line_width=0.2, label='surface', opacity=opacity)
+
+            """Les points"""
+            if point and len(pcolors)>0:
+                setcolors = set(pcolors)
+                colors = asarray(pcolors)
+                Pv = P[where(colors=='v')]
+                Po = P[where(colors=='o')]
+                Pr = P[where(colors=='r')]
+                Pm = P[where(colors=='m')]
+
+                vmesh = pv.PolyData(Pv)
+                rmesh = pv.PolyData(Pr)
+                omesh = pv.PolyData(Po)
+                mmesh = pv.PolyData(Pm)
+                if len(Pv)>0 : p.add_mesh(vmesh, color='green', render_points_as_spheres=True, point_size=5, pickable=True, label='Axile')
+                if len(Pr)>0 : p.add_mesh(rmesh, color='red', render_points_as_spheres=True, point_size=4, pickable=True, label='intérieurs')
+                if len(Po)>0 : p.add_mesh(omesh, color='orange', render_points_as_spheres=True, point_size=4, pickable=True, label='grille')
+                if len(Pm)>0 : p.add_mesh(mmesh, color='magenta', render_points_as_spheres=True, point_size=4, pickable=True, label='trous')
+
+                if 1:
+                    """ label pour debug """
+                    vmesh['labels'] = [posi for posi in POS[where(colors=='v')]]
+                    rmesh['labels'] = [posi for posi in POS[where(colors=='r')]]
+                    omesh['labels'] = [posi for posi in POS[where(colors=='o')]]
+                    mmesh['labels'] = [posi for posi in POS[where(colors=='m')]]
+                    if len(Pv)>0 : p.add_point_labels(vmesh,'labels',font_size=12, text_color='green', fill_shape=False, shape=None)
+                    if len(Pr)>0 : p.add_point_labels(rmesh,'labels',font_size=12, text_color='red', fill_shape=False, shape=None)
+                    if len(Po)>0 : p.add_point_labels(omesh,'labels',font_size=12, text_color='orange', fill_shape=False, shape=None)
+                    if len(Pm)>0 : p.add_point_labels(mmesh,'labels',font_size=12, text_color='magenta', fill_shape=False, shape=None)
+
+    if show :
+        p.show()
+
+def plotlyNoeuds3d(noeuds, connexions, session='default', show=True, data=None,
+                   key='connexions', filename=None, colors=None):
+    """plot avec plotly, noeuds est une liste d'instances de Noeud"""
+    if data is None:
+        data = []
+    mode = GraphicsPrefs.mode
+    marker = GraphicsPrefs.marker
+    badnodes = []
+    points = ndarray((len(noeuds),3), float)
+    for k, n in enumerate(noeuds) :
+        xyz = n.xyz
+        if iterable(xyz) and len(xyz)==3 :
+            points[k] = xyz
+        else :
+            badnodes.append(n)
+            points[k]=(nan,nan,nan)
+    points[:,2] *= -1
+    data.extend(plotNodes3D(points, data=data, show=False, colors=colors))
+    #construction des cellules vraies (avec des points3D)
+    _, nbp = connexions.shape#nb de cellules, nb de points par cellule
+    if nbp>2 :
+        #si nbp>2  (e.g. tri ou quad), un point suppl. pour refermer le polyline
+        nbp += 1
+
+    for k, I in enumerate(connexions) :
+        cell = ndarray((nbp, 3), dtype=float)
+        Ip = []
+        for kp, i in enumerate(I) : #kp-ieme point de cell
+            ni = noeuds[i]
+            x,y,z = ni.xyz
+            cell[kp] = x,y,-z
+            Ip.append(ni.num)
+        #fermeture cell si nbp>2
+        if nbp>2 : cell[1+kp] = noeuds[I[0]]
+
+        goc = go.Scatter3d(x=cell[:,0], y=cell[:,1], z=cell[:,2],
+                           text        = 'Cell %d => '%k+repr(Ip),
+#                            text        = 'Cell %d => '%k+repr(I.tolist()),
+                           mode        = mode[key],
+                           marker      = marker[key],#{'size':3, 'color':'rgb(255,100,100)'},
+                           name        = 'connexions' if k==0 else str(k),
+                           hoverinfo   = 'text',
+                           showlegend  = k==0,)
+#                            legendgroup = 'connexions')
+        data.append(goc)
+    if show :
+        if filename is None :
+            filename = RUNS_DIR/'trash'/'trash.html'
+        #Pour aspect ratio
+        layout = go.Layout(width = 1800, height = 1200,
+                           title = 'connexions ' + session,
+                           scene_aspectmode='data',
+                           scene = dict(xaxis = dict(title = 'x'),
+                                        yaxis = dict(title = 'y'),
+                                        zaxis = dict(title = 'z'),
+                                        hovermode = 'closest'))
+
+        figure = go.Figure(data=data, layout=layout)
+        plot(figure, show_link=True,
+             link_text='Exporter vers plot.ly (pour édition)', filename=filename)
+        return filename
+    else :
+        return data
+
+def plotConnexions3D(A, C, session='default', show=True, data=None,
+                     key='connexions', filename=None, withnodes=True, colors=None):
+    """plot avec plotly"""
+    if data is None:
+        data = []
+    noeuds = A
+    connexions = C
+    mode = GraphicsPrefs.mode
+    marker = GraphicsPrefs.marker
+    data = data
+    if withnodes :
+        data.extend(plotNodes3D(noeuds, data=data, show=False, colors=colors))
+    #construction des cellules vraies (avec des points3D)
+    _, nbp = connexions.shape#nb de cellules, nb de points par cellule
+    if nbp>2 :
+        #si nbp>2  (e.g. tri ou quad), un point suppl. pour refermer le polyline
+        nbp += 1
+    for k, I in enumerate(connexions) :
+        cell = ndarray((nbp, 3), dtype=float)
+        for kp, i in enumerate(I) : #kp-ieme point de cell
+            cell[kp] = noeuds[i]
+        #fermeture cell si nbp>2
+        if nbp>2 : cell[1+kp] = noeuds[I[0]]
+
+        goc = go.Scatter3d(x=cell[:,0], y=cell[:,1], z=cell[:,2],
+                           text        = 'Cell %d => '%k+repr(I.tolist()),
+                           mode        = mode[key],
+                           marker      = marker[key],#{'size':3, 'color':'rgb(255,100,100)'},
+                           name        = 'connexions' if k==0 else str(k),
+                           hoverinfo   = 'text',
+                           showlegend  = k==0,)
+#                            legendgroup = 'connexions')
+        data.append(goc)
+    if show :
+        if filename is None :
+            filename = RUNS_DIR/'trash'/'trash.html'
+        #Pour aspect ratio
+        layout = go.Layout(width = 1800, height = 1200,
+                           title = 'connexions ' + session,
+                           scene_aspectmode='data',
+                           scene = dict(xaxis = dict(title = 'x'),
+                                        yaxis = dict(title = 'y'),
+                                        zaxis = dict(title = 'z'),
+                                        hovermode = 'closest'))
+
+        figure = go.Figure(data=data, layout=layout)
+        plot(figure, show_link=True,
+             link_text='Exporter vers plot.ly (pour édition)', filename=filename)
+        return filename
+    else :
+        return data
+def plotNodes3D(nodes=None, session='', show=True, data=None,
+                key='nodes', filename=None, colors=None):
+    """
+    :param nodes: ndarray((-1,3), float), les n.xyz des noeuds n à plotter
+    :param session: str, nom de la session
+    :param show: bool, True pour affichage immédiat, et False pour affichage différé.
+    Par exemple si on veut tracer noeuds1 puis, par dessus, noeuds2 :
+    >>> data = plotNodes3D(noeuds1, data=data, key='contour', show=False)
+    >>> data = plotNodes3D(noeuds2, data=data, key='contour', show=True)
+    :param colors : list pour passer les couleurs des noeuds """
+    if data is None:
+        data = []
+    mode = GraphicsPrefs.mode
+    marker = GraphicsPrefs.marker
+    data = data
+    if nodes is not None :
+        X,Y,Z = XYZ(nodes)
+        if colors is not None:
+            col = codesCouleurs(colors)
+            siz = sizCouleurs(colors)
+            goc = go.Scatter3d(x=X, y=Y, z=Z,
+                               mode        = mode[key],
+                               marker      = dict(color=col, size=siz),
+        #                        text = text,
+        #                        hoverinfo   = 'text',
+                               showlegend  = True,
+                               legendgroup = 'noeuds')
+        else:
+            goc = go.Scatter3d(x=X, y=Y, z=Z,
+                               mode        = mode[key],
+                               marker      = marker[key],#{'size':3, 'color':'rgb(255,100,100)'},
+        #                        text = text,
+        #                        hoverinfo   = 'text',
+                               showlegend  = True,
+                               legendgroup = 'noeuds')
+        data.append(goc)
+    if show :
+        if filename is None :
+            filename = RUNS_DIR/'trash'/'trash.html'
+        #Pour aspect ratio
+        layout = go.Layout(width = 1800, height = 1200, scene_aspectmode='data',
+                           title = 'noeuds ' + session,
+                           scene = dict(xaxis = dict(title = 'x'),
+                                        yaxis = dict(title = 'y'),
+                                        zaxis = dict(title = 'z'),
+    #                        legend = dict(x=0.9,y=0.9),
+                                        hovermode = 'closest'))
+
+        figure = go.Figure(data=data, layout=layout)
+        plot(figure, show_link=True,
+             link_text='Exporter vers plot.ly (pour édition)', filename=filename)
+        return filename
+    else :
+        return data
+
+def det(X,Y,Z):
+    """Determinant dans R^(3,3)"""
+    return X[0]*Y[1]*Z[2] + X[2]*Y[0]*Z[1] + X[1]*Y[2]*Z[0]\
+         - X[2]*Y[1]*Z[0] - X[1]*Y[0]*Z[2] - X[0]*Y[2]*Z[1]
+
+###########################################################################################
+###########################################################################################
+###### Fonctions
+###########################################################################################
+###########################################################################################
+
+# def locate(t, T, eps = 1.0e-5):
+#     """
+#     Localise t dans T=ndarray(n).
+#     On doit avoir T[0]<=t<=T[-1] et T croissant, len(T)>=2
+#     retourne (True_ou_False, index),
+#     - (True, k) si t=T[k] à eps près (t est une des valeurs T[k])
+#     - (False, k) si T[k] < t < T[k+1] (t n'est pas un T[k])
+#     """
+#     g = where(T<=t+eps)[0]
+#     d = where(T>=t-eps)[0]
+#     return (True, g[-1]) if g[-1]==d[0] else (False, g[-1])
+
+def prodVect(u,v):
+    """ Produit vectoriel des vecteurs u et v """
+    u1,u2,u3 = u[0],u[1],u[2]
+    v1,v2,v3 = v[0],v[1],v[2]
+    w1 = u2*v3-u3*v2
+    w2 = u3*v1-u1*v3
+    w3 = u1*v2-u2*v1
+    return asarray([w1,w2,w3]).reshape((1,3))
+
+# def prodScal(u,v):
+#     ''' Produit scalaire des vecteurs u et v '''
+#     return sum([u[i]*v[i] for i in range(len(u))])
+#     return u[0]*v[0] + u[1]*v[1] + u[2]*v[2]
+
+def encombrement(piece, dim=3):
+    """
+    piece doit être un np.ndarray de shape (N, dim) quelconque,
+    retourne le parallelepipede d'encombrement du nuage de points
+    """
+    if isinstance(piece, (list, tuple )) :
+        return encombrement(np.asarray(piece),dim)#recursif
+    elif isinstance(piece,np.ndarray):
+        Max, Min = np.max, np.min #ca reste local
+        if dim == 1 :
+            return Min(piece), Max(piece)
+        points = piece.view()
+        points.shape = -1, dim
+        if dim == 3 :
+            M = [Max(points[:,0]), Max(points[:,1]), Max(points[:,2])]
+            m = [Min(points[:,0]), Min(points[:,1]), Min(points[:,2])]
+#             M = np.asarray([Max(points[:,0]),Max(points[:,1]),Max(points[:,2])])
+#             m = np.asarray([Min(points[:,0]),Min(points[:,1]),Min(points[:,2])])
+            return m, M
+        elif dim == 2 :
+            M = [Max(points[:,0]), Max(points[:,1])]
+            m = [Min(points[:,0]), Min(points[:,1])]
+            return m, M
+    else :
+        raise NotImplementedError
+
+def encombrement1(piece, dim=3):
+    """retourne l'encombrement de la piece sous forme dx[,dy[,dz]]"""
+    m, M = encombrement(piece, dim)
+    return np.asarray(M) - np.asarray(m)
+
+# def prodScal(u,v):
+#     ''' Produit scalaire des vecteurs u et v '''
+#     return u[0]*v[0] + u[1]*v[1] + u[2]*v[2]
+
+def rotated(points, alfa, centre, axe):
+    """
+    Retourne une COPIE de points rotationnée(!).
+    Arguments
+    ---------
+    :param alfa : reel, l'angle en radians
+    :param centre : liste de 3 reels [x,y,z] ou ndarray de shape (1,3) ou (3,1),
+        c'est le centre de la rotation
+    :param axe : liste de 3 reels [x,y,z] ou ndarray de shape (1,3) ou (3,1),
+        est l'axe de la rotation, non normalisé.
+    Fonctionnement:
+    --------------
+    X est une copie de points
+    La rotation est définie, pour M=X[i], i=1,2,... par
+        M <- C + R(u,a).(M-C), ou R(u,a) est la matrice de rotation
+    X est supposé stocké par ligne (shape=(n,3)), chaque point est de shape (1,3),
+    il les faudrait en colonne (shape=(2,1)) pour faire le produit matriciel.
+    Donc on transpose tout et au lieu de M <- C + R(u,a)*(M-C), on ecrit (' designe la transposition)
+        M' <- C' + (M'-C')*R(u,a)' , pour M=X[i], i= 0, 1,...
+    La matrice de la rotation est R(u,a) =
+    \begin{array}{ccc}
+    \cos\theta+u_{x}^{2}\left(1-\cos\theta\right) & u_{x}u_{y}\left(1-\cos\theta\right)-u_{z}\sin\theta & u_{x}u_{z}\left(1-\cos\theta\right)+u_{y}\sin\theta\\
+    u_{y}u_{x}\left(1-\cos\theta\right)+u_{z}\sin\theta & \cos\theta+u_{y}^{2}\left(1-\cos\theta\right) & u_{y}u_{z}\left(1-\cos\theta\right)-u_{x}\sin\theta\\
+    u_{z}u_{x}\left(1-\cos\theta\right)-u_{y}\sin\theta & u_{z}u_{y}\left(1-\cos\theta\right)+u_{x}\sin\theta & \cos\theta+u_{z}^{2}\left(1-\cos\theta\right)
+    \end{array}
+    """
+    X = points.copy()
+    u = asarray(axe).reshape((3,))
+    u = u/LA.norm(u)
+    Ct = asarray(centre).reshape((1,3))
+    c, s = cos(alfa), sin(alfa)
+    c1 = 1-c
+    c1u0 = c1*u[0]
+    c1u1 = c1*u[1]
+    c1u01 = c1u0*u[1]
+    c1u02 = c1u0*u[2]
+    c1u12 = c1u1*u[2]
+    su0 = s*u[0]
+    su1 = s*u[1]
+    su2 = s*u[2]
+    Rt = matrix([[c+u[0]*c1u0, c1u01-su2    , c1u02+su1],
+                    [c1u01+su2  , c+u[1]*c1u1  , c1u12-su0],
+                    [c1u02-su1  , c1u12+su0    , c+u[2]**2*c1]]).transpose()
+    X -= Ct
+    X[:,:] = X*Rt
+    X += Ct
+    return X
+
+# def dist(p, q, n=2):
+#     '''retourne la distance de p1 à p2 en norme n=2'''
+#     return math.sqrt((p[0]-q[0])**2 + (p[1]-q[1])**2 + (p[2]-q[2])**2)
+#
+# def dist2(p, q, n=2):
+#     '''retourne la distance de p1 à p2 en norme n=2'''
+#     return (p[0]-q[0])**2 + (p[1]-q[1])**2 + (p[2]-q[2])**2
+
+def sphereCirconscriteA4Points(A,B,C,D):
+    """I = centre, R = rayon"""
+    AB, AC, AD = B-A, C-A, D-A
+    M = asarray([[AB[0], AB[1], AB[2]],
+                  [AC[0], AC[1], AC[2]],
+                  [AD[0], AD[1], AD[2]]])
+    b = asarray([prodScal(AB, A+B), prodScal(AC, A+C), prodScal(AD, A+D)])/2.0
+    try :
+        I = LA.solve(M,b)
+        return I, LA.norm(I-A)
+    except LA.LinAlgError :
+        return None, None
+
+def ellipse(centre, axes, nbp=20):
+    if len(centre)==2 : centre = [centre[0], centre[1], 0.0]
+    a,  b= axes
+    T = np.linspace(0.0, 2*pi, nbp)
+    T[-1] = 0.0
+    return asarray(list(zip(a*cos(T), b*sin(T), len(T)*[0.0])))+centre
+
+def cercle(centre, r, nbp=20):
+    return ellipse(centre, (r,r), nbp)
+
+def volumeTetraedre(A,B,C,D):
+    """C'est det(AB,AC,AD)/6"""
+    u, v, w = B-A, C-A, D-A
+    return abs(u[0]*v[1]*w[2]+u[2]*v[0]*w[1]+u[1]*v[2]*w[0]\
+            - (u[2]*v[1]*w[0]+u[1]*v[0]*w[2]+u[0]*v[2]*w[1]))/6
+
+def volumeTetraedre1(A,B,C,D):
+    """C'est det(AB,AC,AD)/6"""
+    return det(B-A,C-A,D-A)
+
+def surfaceTriangle(a,b,c):
+    raise NotImplementedError('surfaceTriangle() : Utiliser plutôt aireTriangle(), 2 à 10 fois plus rapide')
+    return norm(cross(b-a, c-a),axis=1)*0.5
+
+def normalise3d(profil):
+    """Normalisation d'un polygone 3D, qui représente un profil.
+    Le profil est translaté de -BA et la rotation est d'axe Oy
+        (les Y ne sont pas modifiés)
+    :param profil:ndarray((n,3), float), le profil, BF=profil[0]=profil[-1]
+    :Attention : il faut être certain que le polygone est plan !
+    Le mieux serait que les Y soient constants, c'est le cas de la cloisoncentrale...
+    :returns profil normalisé, corde, nba, alfa
+    :Attention : cette routine retourne parfois des points doubles
+    :TODO : regarder pourquoi on a des points doubles, p.ex. pour les cloisons de Whizz2"""
+    corde, nba = computeCordeAndNBA(profil)
+#     debug(corde, nba,profil.shape)
+#     facteur = scale/corde
+    profil -= profil[nba]#le zero au BA
+    profil /= corde
+    u = profil[0]#=bf-binance_account
+    alfa = np.arctan2(u[1], u[0])
+    ca, sa = cos(alfa), sin(alfa)
+    X0, Y0, Z0 = XYZ(profil)
+#     X0.shape = Y0.shape = Z0.shape = 150
+#     debug(asarray((X0*ca-Z0*sa, Y0, X0*sa+Z0*ca)).T)
+#     mexit()
+#     mexit()
+    return asarray((X0*ca-Z0*sa, Y0, X0*sa+Z0*ca)).T, corde, nba, alfa
+
+
+if __name__=="__main__":
+    P = asarray([[0.0, 0.0, 0.0], [0.0005472, 0.0, -2.2597997e-08], [0.0005472, 0.0, -2.2597997e-08], [0.0005472, 0.0, -2.2597997e-08], [0.0005472, 0.0, -2.2597997e-08], [0.0005472, 0.0, -2.2597997e-08], [0.0005472, 0.0, -2.2597997e-08], [0.000821876327, 0.0, -2.6181189e-08], [0.00199046947, 0.0, -3.51018091e-08], [0.00432424904, 0.0, -4.69798672e-08], [0.00774352965, 0.0, -6.08849328e-08], [0.012241538, 0.0, -7.70599223e-08], [0.0178267449, 0.0, -9.50193943e-08], [0.0245410912, 0.0, -1.1311962e-07], [0.0323835259, 0.0, -1.30261025e-07], [0.0413214745, 0.0, -1.45494258e-07], [0.0513106267, 0.0, -1.57959309e-07], [0.0622796992, 0.0, -1.67044348e-07], [0.0741546651, 0.0, -1.72982516e-07], [0.0868678997, 0.0, -1.77115789e-07], [0.100344508, 0.0, -1.8116152e-07], [0.114524762, 0.0, -1.85377966e-07], [0.129351944, 0.0, -1.89548273e-07], [0.144767257, 0.0, -1.93405512e-07], [0.160710035, 0.0, -1.9663674e-07], [0.177117343, 0.0, -1.98930463e-07], [0.193921049, 0.0, -2.00194104e-07], [0.211049864, 0.0, -2.00439229e-07], [0.228430853, 0.0, -1.99703154e-07], [0.245990404, 0.0, -1.98037128e-07], [0.263656264, 0.0, -1.95477352e-07], [0.281356274, 0.0, -1.92068304e-07], [0.299018166, 0.0, -1.87868569e-07], [0.316568236, 0.0, -1.82851621e-07], [0.333929476, 0.0, -1.7677345e-07], [0.351025503, 0.0, -1.69391653e-07], [0.367781674, 0.0, -1.60515205e-07], [0.384127905, 0.0, -1.50189733e-07], [0.400000076, 0.0, -1.38777957e-07], [0.415336239, 0.0, -1.26652649e-07], [0.430076419, 0.0, -1.14159334e-07], [0.444162805, 0.0, -1.01609821e-07], [0.457539959, 0.0, -8.92775882e-08], [0.470155013, 0.0, -7.73950453e-08], [0.481957826, 0.0, -6.6147674e-08], [0.492900499, 0.0, -5.56121467e-08], [0.502938169, 0.0, -4.5811226e-08], [0.512029975, 0.0, -3.6785227e-08], [0.520139183, 0.0, -2.85894847e-08], [0.527233259, 0.0, -2.12894065e-08], [0.533283931, 0.0, -1.49552902e-08], [0.538267232, 0.0, -9.65717033e-09], [0.542163567, 0.0, -5.46244383e-09], [0.5449578, 0.0, -2.43478519e-09], [0.546638877, 0.0, -6.09488619e-10], [0.5472, 0.0, 0.0]])
+
+    P = asarray([[0,0,0],[1,0,0], [2,0,0], [2,1,0], [2,2,0], [1,2,0], [0,2,0],[0,1,0], [0,0,0]])
+    P = asarray([[0,0,0],[2,0,0], [2,1,0], [2,2,0], [1,2,0], [0,2,0],[0,1,0], [0,0,0]])
+    P = asarray([[0,0,0],[0,1,0], [0,0,1],[0,0,0]])#, [2,2,0], [1,2,0], [0,2,0],[0,1,0], [0,0,0]])
+    Ph = asarray([[0.338, 5.149, -2.116], [0.325, 5.151, -2.114], [0.311, 5.152, -2.113], [0.298, 5.154, -2.112], [0.285, 5.156, -2.11], [0.272, 5.158, -2.109], [0.258, 5.16, -2.108], [0.245, 5.161, -2.106], [0.232, 5.163, -2.105], [0.218, 5.165, -2.103], [0.205, 5.167, -2.102], [0.192, 5.169, -2.101], [0.178, 5.17, -2.099], [0.165, 5.172, -2.098], [0.152, 5.174, -2.097], [0.139, 5.176, -2.095], [0.125, 5.177, -2.094], [0.112, 5.179, -2.093], [0.099, 5.181, -2.091], [0.085, 5.183, -2.09], [0.072, 5.184, -2.089], [0.059, 5.186, -2.088], [0.045, 5.188, -2.086], [0.032, 5.19, -2.085], [0.019, 5.191, -2.084], [0.005, 5.193, -2.082], [-0.008, 5.195, -2.081], [-0.021, 5.197, -2.08], [-0.034, 5.198, -2.078], [-0.048, 5.2, -2.077], [-0.061, 5.202, -2.076], [-0.074, 5.203, -2.075], [-0.088, 5.205, -2.073], [-0.101, 5.207, -2.072], [-0.114, 5.208, -2.071], [-0.128, 5.21, -2.069], [-0.141, 5.212, -2.068], [-0.154, 5.213, -2.067], [-0.168, 5.215, -2.066], [-0.181, 5.217, -2.064], [-0.194, 5.218, -2.063], [-0.208, 5.22, -2.062], [-0.221, 5.221, -2.061], [-0.234, 5.223, -2.06], [-0.248, 5.224, -2.059], [-0.261, 5.226, -2.058], [-0.275, 5.227, -2.057], [-0.288, 5.229, -2.056], [-0.301, 5.23, -2.055], [-0.315, 5.231, -2.054], [-0.328, 5.232, -2.053], [-0.342, 5.233, -2.052], [-0.355, 5.233, -2.052], [-0.369, 5.234, -2.051], [-0.382, 5.234, -2.051], [-0.395, 5.234, -2.051], [-0.409, 5.234, -2.051], [-0.422, 5.234, -2.051], [-0.436, 5.234, -2.052], [-0.449, 5.233, -2.052], [-0.463, 5.232, -2.053], [-0.476, 5.23, -2.054], [-0.489, 5.229, -2.055], [-0.503, 5.227, -2.057], [-0.516, 5.224, -2.059], [-0.529, 5.221, -2.061], [-0.542, 5.218, -2.064], [-0.554, 5.213, -2.067], [-0.566, 5.209, -2.07], [-0.578, 5.204, -2.074], [-0.589, 5.198, -2.079], [-0.6, 5.191, -2.084], [-0.609, 5.183, -2.09], [-0.617, 5.174, -2.096], [-0.623, 5.165, -2.104], [-0.627, 5.155, -2.111], [-0.627, 5.144, -2.119], [-0.62, 5.135, -2.126], [-0.609, 5.129, -2.131], [-0.597, 5.124, -2.135], [-0.585, 5.118, -2.139], [-0.574, 5.113, -2.143], [-0.561, 5.109, -2.146], [-0.548, 5.107, -2.148], [-0.535, 5.105, -2.149], [-0.521, 5.104, -2.149], [-0.508, 5.103, -2.15], [-0.494, 5.102, -2.151], [-0.481, 5.102, -2.151], [-0.467, 5.101, -2.152], [-0.454, 5.101, -2.152], [-0.44, 5.1, -2.152], [-0.427, 5.1, -2.153], [-0.413, 5.099, -2.153], [-0.4, 5.099, -2.153], [-0.386, 5.099, -2.154], [-0.373, 5.098, -2.154], [-0.36, 5.098, -2.154], [-0.346, 5.098, -2.154], [-0.333, 5.097, -2.154], [-0.319, 5.097, -2.154], [-0.306, 5.098, -2.154], [-0.292, 5.098, -2.154], [-0.279, 5.098, -2.154], [-0.265, 5.098, -2.154], [-0.252, 5.098, -2.154], [-0.238, 5.099, -2.154], [-0.225, 5.099, -2.153], [-0.211, 5.099, -2.153], [-0.198, 5.1, -2.153], [-0.184, 5.101, -2.152], [-0.171, 5.101, -2.152], [-0.157, 5.102, -2.151], [-0.144, 5.103, -2.15], [-0.13, 5.104, -2.15], [-0.117, 5.104, -2.149], [-0.104, 5.105, -2.148], [-0.09, 5.106, -2.148], [-0.077, 5.108, -2.147], [-0.063, 5.109, -2.146], [-0.05, 5.11, -2.145], [-0.037, 5.111, -2.144], [-0.023, 5.113, -2.143], [-0.01, 5.114, -2.142], [0.004, 5.115, -2.141], [0.017, 5.117, -2.14], [0.03, 5.118, -2.139], [0.044, 5.12, -2.137], [0.057, 5.122, -2.136], [0.07, 5.124, -2.135], [0.083, 5.125, -2.133], [0.097, 5.127, -2.132], [0.11, 5.129, -2.131], [0.123, 5.131, -2.129], [0.137, 5.132, -2.128], [0.15, 5.134, -2.127], [0.164, 5.135, -2.126], [0.177, 5.136, -2.125], [0.19, 5.138, -2.124], [0.204, 5.139, -2.123], [0.217, 5.14, -2.122], [0.23, 5.141, -2.121], [0.244, 5.143, -2.12], [0.257, 5.144, -2.12], [0.271, 5.145, -2.119], [0.284, 5.146, -2.118], [0.298, 5.146, -2.118], [0.311, 5.147, -2.117], [0.325, 5.148, -2.116], [0.338, 5.149, -2.116]])
+    Pb = asarray([[0.659, 4.559, -1.262], [0.633, 4.561, -1.258], [0.607, 4.564, -1.255], [0.581, 4.567, -1.251], [0.555, 4.569, -1.248], [0.529, 4.572, -1.244], [0.503, 4.575, -1.24], [0.477, 4.577, -1.237], [0.452, 4.58, -1.233], [0.426, 4.583, -1.23], [0.4, 4.585, -1.226], [0.374, 4.588, -1.223], [0.348, 4.591, -1.219], [0.322, 4.593, -1.216], [0.296, 4.596, -1.212], [0.27, 4.598, -1.209], [0.244, 4.601, -1.206], [0.218, 4.603, -1.202], [0.192, 4.606, -1.199], [0.166, 4.609, -1.195], [0.14, 4.611, -1.192], [0.114, 4.614, -1.189], [0.088, 4.616, -1.185], [0.063, 4.619, -1.182], [0.037, 4.621, -1.178], [0.011, 4.624, -1.175], [-0.015, 4.626, -1.172], [-0.041, 4.629, -1.168], [-0.067, 4.631, -1.165], [-0.093, 4.634, -1.162], [-0.119, 4.636, -1.158], [-0.145, 4.639, -1.155], [-0.171, 4.641, -1.152], [-0.197, 4.644, -1.148], [-0.223, 4.646, -1.145], [-0.249, 4.649, -1.142], [-0.275, 4.651, -1.138], [-0.301, 4.654, -1.135], [-0.327, 4.656, -1.132], [-0.353, 4.658, -1.129], [-0.379, 4.661, -1.126], [-0.405, 4.663, -1.123], [-0.431, 4.665, -1.12], [-0.457, 4.667, -1.117], [-0.483, 4.67, -1.114], [-0.509, 4.672, -1.111], [-0.535, 4.674, -1.108], [-0.561, 4.676, -1.106], [-0.587, 4.677, -1.103], [-0.614, 4.679, -1.101], [-0.64, 4.681, -1.099], [-0.666, 4.682, -1.097], [-0.692, 4.683, -1.096], [-0.718, 4.683, -1.095], [-0.745, 4.684, -1.095], [-0.771, 4.684, -1.094], [-0.797, 4.684, -1.094], [-0.824, 4.684, -1.095], [-0.85, 4.683, -1.096], [-0.876, 4.682, -1.097], [-0.902, 4.68, -1.099], [-0.928, 4.678, -1.102], [-0.954, 4.676, -1.106], [-0.98, 4.673, -1.11], [-1.006, 4.669, -1.115], [-1.031, 4.665, -1.12], [-1.056, 4.659, -1.127], [-1.08, 4.654, -1.135], [-1.104, 4.647, -1.144], [-1.127, 4.639, -1.155], [-1.149, 4.63, -1.166], [-1.169, 4.62, -1.18], [-1.187, 4.609, -1.195], [-1.203, 4.596, -1.211], [-1.215, 4.582, -1.23], [-1.222, 4.567, -1.25], [-1.222, 4.552, -1.271], [-1.209, 4.538, -1.289], [-1.187, 4.53, -1.3], [-1.164, 4.522, -1.311], [-1.141, 4.514, -1.321], [-1.118, 4.506, -1.332], [-1.094, 4.501, -1.339], [-1.068, 4.497, -1.344], [-1.042, 4.495, -1.347], [-1.016, 4.493, -1.349], [-0.99, 4.492, -1.351], [-0.964, 4.491, -1.352], [-0.937, 4.49, -1.354], [-0.911, 4.489, -1.355], [-0.885, 4.489, -1.356], [-0.858, 4.488, -1.356], [-0.832, 4.487, -1.357], [-0.806, 4.487, -1.358], [-0.78, 4.486, -1.359], [-0.753, 4.485, -1.36], [-0.727, 4.485, -1.361], [-0.701, 4.484, -1.361], [-0.675, 4.484, -1.362], [-0.648, 4.484, -1.362], [-0.622, 4.484, -1.362], [-0.596, 4.484, -1.362], [-0.569, 4.484, -1.362], [-0.543, 4.484, -1.361], [-0.517, 4.484, -1.361], [-0.491, 4.485, -1.361], [-0.464, 4.485, -1.36], [-0.438, 4.486, -1.359], [-0.412, 4.487, -1.358], [-0.385, 4.487, -1.357], [-0.359, 4.488, -1.356], [-0.333, 4.489, -1.355], [-0.307, 4.49, -1.353], [-0.281, 4.491, -1.352], [-0.254, 4.493, -1.35], [-0.228, 4.494, -1.348], [-0.202, 4.495, -1.346], [-0.176, 4.497, -1.344], [-0.15, 4.499, -1.342], [-0.123, 4.5, -1.34], [-0.097, 4.502, -1.338], [-0.071, 4.504, -1.335], [-0.045, 4.506, -1.332], [-0.019, 4.508, -1.33], [0.007, 4.51, -1.327], [0.033, 4.512, -1.324], [0.059, 4.514, -1.321], [0.085, 4.517, -1.318], [0.111, 4.519, -1.314], [0.137, 4.522, -1.311], [0.163, 4.525, -1.307], [0.189, 4.527, -1.304], [0.215, 4.53, -1.3], [0.241, 4.532, -1.297], [0.267, 4.534, -1.294], [0.293, 4.537, -1.291], [0.319, 4.539, -1.289], [0.345, 4.541, -1.286], [0.371, 4.543, -1.283], [0.397, 4.545, -1.281], [0.423, 4.546, -1.278], [0.449, 4.548, -1.276], [0.475, 4.55, -1.274], [0.502, 4.551, -1.272], [0.528, 4.553, -1.27], [0.554, 4.554, -1.268], [0.58, 4.555, -1.266], [0.606, 4.557, -1.265], [0.633, 4.558, -1.263], [0.659, 4.559, -1.262]])
+
+#     Ph = asarray([[0,1,1],[0,0,1], [1,0,1]])#,[0,0,0]])#, [2,2,0], [1,2,0], [0,2,0],[0,1,0], [0,0,0]])
+#     Pb = asarray([[0,1,0],[0,0,0], [1,0,0]])
+
+    all_ = vstack((Ph,Pb[::-1],Ph[0]))
+    G0 = centreGTrados(Ph,Pb, 0, False).reshape(1,3)
+    G1 = centreGTrados(Ph,Pb, 1, False).reshape(1,3)
+#     bary = average(all_,0)
+#     print('all_',all_.tolist())
+#     print('baryall',baryall)
+    print('G0',G0)
+    print('G1',G1)
+#     debug(Gb=Gb,Gh=Gh)
+    import matplotlib as mpl
+#     from mpl_toolkits.mplot3d import Axes3D
+#     import numpy as np
+    import matplotlib.pyplot as plt
+
+    mpl.rcParams['legend.fontsize'] = 10
+
+    fig = plt.figure()
+    ax = fig.gca(projection='3d')
+    ax.plot(*XYZ(all_), 'r')#, label='all')
+    ax.plot(*XYZ(G0), 'ro', label='Cg (1) %s'%fmt(G0.tolist(),4))
+    ax.plot(*XYZ(G1), 'bo', label='Cg (0) %s'%fmt(G1.tolist(),4))
+#     ax.plot(*XYZ(Ph), 'k', label='haut')
+#     ax.plot(*XYZ(Gh), 'ko', label='Cg haut %s'%fmt(Gh.tolist()))
+#     ax.plot(*XYZ(Pb), 'b', label='bas')
+#     ax.plot(*XYZ(Gb), 'bo', label='Cg bas %s'%fmt(Gb.tolist()))
+    ax.legend()
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    plt.show()
+    mexit()
+#     all_ = vstack((left,right))
+#     G = centreG(all_)
+#     G.shape=(1,3)
+#     print(G.shape)
+#     ax.plot(*XYZ(all_), 'k', label='all')
+#     ax.plot(*XYZ(G), 'ro')
+# #     ax.plot(*XYZ(left), 'b', label='left')
+# #     ax.plot(*XYZ(right), 'r', label='right')
+#     ax.legend()
+#
+#
+# #     print(centreG(P))
+# #     P = random.rand(4,3)
+# #     print(P)
+#     mexit()
+    A, B, C, D = random.rand(4, 3)
+
+    print(A)
+    mexit()
+#     A,B,C = asarray([[[0,0,0]],[[1,0,0]],[[0,1,0]]])
+#     print (A.shape)
+#     mexit()
+    t = TicToc()
+#     t.tic()
+#     for i in range(1000) : NN = surfaceTriangle(A, B, C)
+#     t.toc(restart=True)
+#     t.tic()
+#     for i in range(1000) : AA = aireTriangle(A, B, C)
+#     t.toc()
+#     print('NN =',norm(NN-AA))
+#     print('AA =',AA)
+    t.tic()
+    for i in range(1000) : V = volumeTetraedre(A, B, C, D)
+    t.toc(restart=True)
+    for i in range(1000) : V1 = volumeTetraedre1(A, B, C, D)
+    t.toc()
+    mexit(V-V1)
+    from tests.utils.testsgeometry3d import Tests
+    t = Tests()
+#     t.run()
+
+#     if 1 : t.testPointsDoubles()
+#     if 1 : t.testPointsDoubles1()
+#     if 1 : t.testPlacementNervureI(None)
+#     if 1 : t.testRotation()
+    if 1 : t.testPanels()
+#     if 1 : t.testDivers()
+#     if 1 : t.testDivers1()
+#     if 1 : t.testPolyline3D()
+    exit()
+
+
+    import cProfile, pstats
+    filename = OUTPUT/'profile.stats'
+    cProfile.run('main()',filename)
+    stats=pstats.Stats(filename)
+    stats.strip_dirs()
+    stats.sort_stats('cumulative')
+    stats.sort_stats('time')
+    stats.print_stats()

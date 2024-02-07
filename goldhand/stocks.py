@@ -8,6 +8,9 @@ import numpy as np
 import requests
 import json
 import cloudscraper
+# import jgtapy as ta
+from utilitaires import debug, red, mexit
+
 
 class GoldHand:
     def __init__(self, ticker, ad_ticker=True, range='18y', interval='1d'):
@@ -26,6 +29,7 @@ class GoldHand:
         self.interval = interval
         self.ticker = ticker
         self.df = None
+        self.senkou = None
         self.download_historical_data()
 
 
@@ -74,8 +78,40 @@ class GoldHand:
         self.df = self.get_olhc()
         self.df.columns = self.df.columns.str.lower()
         self.df['hl2'] = (self.df['high'] + self.df['low'])/2
-        
+        print("*********************************************")
+        print("*********************************************")
+        print("*********************************************")
+        print("*********************************************")
+        print("*********************************************")
+        print("*********************************************")
+        print("*********************************************")
         try:
+            # Ichimoku.
+            # ATTENTION : ichi, span = ta.ichimoku(...)
+            # ichi a la même dimension que self.df
+            # span est de dimensions 26,2
+            ichi, span = ta.ichimoku(high=self.df['high'], low=self.df['low'], close=self.df['close'])
+
+            self.ichimoku = dict()
+            self.ichimoku['senkou_A'] = ichi['ISA_9']
+            self.ichimoku['senkou_B'] = ichi['ISB_26']
+            self.ichimoku['tenkan'] = ichi['ITS_9']
+            self.ichimoku['chikou'] = ichi['ICS_26']
+            self.ichimoku['kijun'] = ichi['IKS_26']
+            self.senkou = pd.DataFrame(data=dict(A=span['ISA_9'], B=span['ISB_26']))
+            print(self.ichimoku)
+            print(span)
+            # exit()
+            # self.senkou['A'] = ichi['ISA_9']
+            # self.senkou['B'] = ichi['ISB_26']
+            # self.df['tenkan'] = ichi['ITS_9']
+            # self.df['chikou'] = ichi['ICS_26']
+            # self.df['kijun'] = ichi['IKS_26']
+            # # span.rename(columns={'ISA_9': 'senkou_A', 'ISB_26': 'senkou_B'})
+            # debug(self.senkou,titre="senkou AVANT pandas.concat")
+            # self.senkou = pd.concat([self.senkou, span.rename(columns={'ISA_9': 'A', 'ISB_26': 'B'})])
+            # debug(self.senkou,titre="senkou APRES pandas.concat", )
+            # exit()
             # Rsi
             self.df['rsi'] = ta.rsi(self.df['close'], 14)
 
@@ -167,7 +203,8 @@ class GoldHand:
                         temj = '😭💔' 
                     self.df.loc[states[i], 'local_text'] = f'{temj}{fall}%<br>${round(current_low, 2)}'
             self.df.reset_index(inplace=True, drop=True)
-        except:
+        except Exception as msg:
+            print(msg)
             pass
 
     def plotly_last_year(self, plot_title, plot_height=900, ndays=500, ad_local_min_max=True):
